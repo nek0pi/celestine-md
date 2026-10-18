@@ -109,11 +109,12 @@ Installs the latest **x86_64** release into `~/.local` (binary, desktop entry, i
 ```bash
 brew tap nek0pi/celestine
 brew install celestine-md
+brew upgrade celestine-md   # after each new formula bump
 # or build from git HEAD:
 brew install --HEAD nek0pi/celestine/celestine-md
 ```
 
-Formula: [`packaging/homebrew/celestine-md.rb`](packaging/homebrew/celestine-md.rb) (prebuilt release binaries). Tap setup: [`docs/RELEASE.md`](docs/RELEASE.md).
+Tap: [nek0pi/homebrew-celestine](https://github.com/nek0pi/homebrew-celestine).
 
 ### Arch Linux (AUR)
 
@@ -122,8 +123,7 @@ yay -S celestine-md
 # or: paru -S celestine-md
 ```
 
-PKGBUILD: [`packaging/aur/PKGBUILD`](packaging/aur/PKGBUILD).
-
+Available after the AUR package is published (see [`docs/RELEASE.md`](docs/RELEASE.md)). PKGBUILD: [`packaging/aur/PKGBUILD`](packaging/aur/PKGBUILD).
 ### Prebuilt archives (Linux / macOS / Windows)
 
 Tagged releases ship **Linux x86_64**, **macOS** (Intel + Apple Silicon), and **Windows x86_64**:

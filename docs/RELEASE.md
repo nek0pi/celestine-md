@@ -21,8 +21,8 @@ GitHub Actions (`.github/workflows/release.yml`) builds **Linux**, **macOS** (In
 |---------|----------------|-------------------|
 | **GitHub Releases** (binaries) | ✅ workflow + `v0.2.0` live | Push tags when cutting releases |
 | **Linux one-liner** | ✅ `packaging/install-from-release.sh` | None after script is on `main` |
-| **Homebrew** | ✅ binary formula (`0.2.0` checksums) | Create tap `nek0pi/homebrew-celestine`, push formula |
-| **Arch AUR** | ✅ `PKGBUILD` (`0.2.0` checksum) | AUR account + push package |
+| **Homebrew** | ✅ tap live (`nek0pi/homebrew-celestine`) | Bump formula checksums on each release |
+| **Arch AUR** | ✅ `PKGBUILD` + `.SRCINFO` in-repo | One-time: AUR account + SSH key, then push package |
 | **Flathub / Snap** | ❌ not set up | Separate packaging + review queues |
 
 I cannot publish to Homebrew core, AUR, or Flathub without your credentials and review processes.
