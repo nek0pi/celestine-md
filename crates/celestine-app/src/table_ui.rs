@@ -210,8 +210,9 @@ pub fn show_editable(
             .corner_radius(CornerRadius::same(2))
             .inner_margin(Margin::ZERO)
             .show(ui, |ui| {
-                let (rect, _) =
-                    ui.allocate_exact_size(Vec2::new(total_w, total_h), Sense::hover());
+                // Reserve layout space only — no Sense widget over the grid, or
+                // TextEdits never win the click (and cells stay uneditable).
+                let (_, rect) = ui.allocate_space(Vec2::new(total_w, total_h));
                 paint_row_fills(ui, rect, &widths, n_rows, style, row_h);
 
                 for (ri, row) in grid.iter_mut().enumerate() {
