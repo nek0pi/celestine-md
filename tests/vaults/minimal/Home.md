@@ -1,0 +1,3 @@
+# Home
+
+See [[Projects/Alpha]].

@@ -97,6 +97,8 @@ pub struct CelestineApp {
     update_checker: UpdateChecker,
     /// Hide the update banner for this session after dismiss/open.
     update_banner_hidden: bool,
+    image_resolver: crate::media::ImageResolver,
+    image_rels: Option<Vec<String>>,
 }
 
 impl CelestineApp {
@@ -156,6 +158,8 @@ impl CelestineApp {
             recent_notes: Vec::new(),
             update_checker: UpdateChecker::start(env!("CARGO_PKG_VERSION")),
             update_banner_hidden: false,
+            image_resolver: crate::media::ImageResolver::default(),
+            image_rels: None,
         };
 
         if let Some(path) = std::env::args().nth(1) {
@@ -170,6 +174,8 @@ impl CelestineApp {
         match Vault::open(&path) {
             Ok(v) => {
                 self.status = format!("vault {}", path.display());
+                self.image_resolver.clear();
+                self.image_rels = None;
                 self.tabs.clear();
                 self.active_tab = 0;
                 self.show_graph = false;
@@ -178,8 +184,8 @@ impl CelestineApp {
                     .into_iter()
                     .find(|r| r.eq_ignore_ascii_case("Home.md"))
                     .or_else(|| v.list_md_rel_paths().into_iter().next());
-                self.folder_icons = file_tree::load_folder_icons(&path);
-                self.recent_notes = load_recent_notes(&path);
+                self.folder_icons = file_tree::load_folder_icons(&v);
+                self.recent_notes = load_recent_notes(&v);
                 self.vault = Some(v);
                 self.persist.push_recent(&path);
                 if let Some(rel) = first {
@@ -192,6 +198,8 @@ impl CelestineApp {
     }
 
     fn close_vault(&mut self) {
+        self.image_resolver.clear();
+        self.image_rels = None;
         self.vault = None;
         self.tabs.clear();
         self.active_tab = 0;
@@ -207,7 +215,7 @@ impl CelestineApp {
 
     fn persist_folder_icons(&self) {
         if let Some(vault) = &self.vault {
-            file_tree::save_folder_icons(&vault.root, &self.folder_icons);
+            file_tree::save_folder_icons(vault, &self.folder_icons);
         }
     }
 
@@ -275,16 +283,15 @@ impl CelestineApp {
             .get(self.active_tab)
             .map(|t| t.rel.as_str())
             .unwrap_or("");
-        let images = vault.list_image_rel_paths();
-        let resolved_rel = crate::media::resolve_image_abs(&vault.root, note_rel, rel, &images)
-            .and_then(|abs| crate::media::abs_to_rel(&vault.root, &abs))
-            .unwrap_or_else(|| rel.replace('\\', "/"));
-        let abs = vault.root.join(&resolved_rel);
-        if !abs.is_file() {
+        let images = self
+            .image_rels
+            .get_or_insert_with(|| vault.list_image_rel_paths());
+        self.image_resolver.set_context(vault.root(), note_rel, "");
+        let Some(image) = self.image_resolver.resolve(rel, images) else {
             self.status = format!("missing image {rel}");
             return;
-        }
-        let rel = resolved_rel.as_str();
+        };
+        let rel = image.rel.as_str();
 
         if push_nav {
             if let Some(cur) = self.tabs.get(self.active_tab) {
@@ -328,7 +335,22 @@ impl CelestineApp {
                 self.status = format!("create failed: {e}");
                 return;
             }
+            self.image_resolver.clear();
+            self.image_rels = None;
         }
+        let note_rel = if rel.to_lowercase().ends_with(".md") {
+            rel.to_string()
+        } else {
+            format!("{rel}.md")
+        };
+        let canonical_rel = match vault.abs_path(&note_rel).and_then(|path| vault.rel_of(&path)) {
+            Ok(rel) => rel,
+            Err(e) => {
+                self.status = format!("open failed: {e}");
+                return;
+            }
+        };
+        let rel = canonical_rel.as_str();
         let content = vault
             .index
             .get_by_rel(rel)
@@ -377,7 +399,7 @@ impl CelestineApp {
         self.recent_notes.insert(0, rel);
         self.recent_notes.truncate(48);
         if let Some(vault) = &self.vault {
-            save_recent_notes(&vault.root, &self.recent_notes);
+            save_recent_notes(vault, &self.recent_notes);
         }
     }
 
@@ -394,6 +416,8 @@ impl CelestineApp {
         }
         match vault.write_note(&tab.rel, &tab.buffer) {
             Ok(()) => {
+                self.image_resolver.clear();
+                self.image_rels = None;
                 tab.dirty = false;
                 self.status = format!("saved {}", tab.rel);
             }
@@ -811,6 +835,8 @@ impl CelestineApp {
         };
         match vault.rename_entry(&old_rel, &new_rel) {
             Ok(()) => {
+                self.image_resolver.clear();
+                self.image_rels = None;
                 self.remap_after_rename(&old_rel, &new_rel, matches!(edit.item, file_tree::TreeNavItem::Dir(_)));
                 self.status = format!("renamed → {new_rel}");
             }
@@ -862,7 +888,7 @@ impl CelestineApp {
             *r = remap(r);
         }
         if let Some(vault) = &self.vault {
-            save_recent_notes(&vault.root, &self.recent_notes);
+            save_recent_notes(vault, &self.recent_notes);
         }
 
         self.tree_cursor = Some(if is_dir {
@@ -885,11 +911,9 @@ impl CelestineApp {
             } else {
                 format!("{parent}/{name}")
             };
-            let exists = self
-                .vault
-                .as_ref()
-                .map(|v| v.root.join(&candidate).exists())
-                .unwrap_or(false);
+            let exists = self.vault.as_ref().is_some_and(|v| {
+                v.abs_path(&candidate).is_ok_and(|path| path.exists())
+            });
             if !exists {
                 break candidate;
             }
@@ -901,6 +925,8 @@ impl CelestineApp {
         };
         match vault.create_folder(&folder_rel) {
             Ok(()) => {
+                self.image_resolver.clear();
+                self.image_rels = None;
                 self.expand_ancestors(&format!("{folder_rel}/_"));
                 self.tree_expanded.insert(folder_rel.clone());
                 self.persist.show_left_sidebar = true;
@@ -927,6 +953,8 @@ impl CelestineApp {
         };
         match vault.delete_entry(&rel) {
             Ok(()) => {
+                self.image_resolver.clear();
+                self.image_rels = None;
                 // Close tabs under deleted path.
                 let prefix = format!("{rel}/");
                 self.tabs.retain(|t| t.rel != rel && !t.rel.starts_with(&prefix));
@@ -1001,6 +1029,8 @@ impl eframe::App for CelestineApp {
 
         if let Some(vault) = self.vault.as_mut() {
             if vault.poll_fs() {
+                self.image_resolver.clear();
+                self.image_rels = None;
                 self.status = "index refreshed".into();
             }
         }
@@ -1036,7 +1066,7 @@ impl eframe::App for CelestineApp {
                     ui.label(RichText::new("celestine").strong().color(accent));
                     if let Some(v) = &self.vault {
                         ui.label(
-                            RichText::new(format!("  {}", v.root.display()))
+                            RichText::new(format!("  {}", v.root().display()))
                                 .color(muted)
                                 .size(12.5),
                         );
@@ -1543,7 +1573,6 @@ impl eframe::App for CelestineApp {
                     let fill_h = ui.available_height().max(80.0);
                     let fill_w = ui.available_width().max(1.0);
                     if let Some(vault) = &self.vault {
-                        let abs = vault.root.join(&rel);
                         ScrollArea::both()
                             .id_salt("image-scroll")
                             .auto_shrink([false, false])
@@ -1551,7 +1580,18 @@ impl eframe::App for CelestineApp {
                             .min_scrolled_height(fill_h)
                             .show(ui, |ui| {
                                 ui.set_min_size(egui::vec2(fill_w, fill_h));
-                                crate::media::show_standalone(ui, &abs, muted);
+                                self.image_resolver.set_context(vault.root(), &rel, "");
+                                if let Some(image) = self.image_resolver.resolve(&rel, &[]) {
+                                    crate::media::show_standalone(ui, &image.abs, muted);
+                                } else {
+                                    ui.centered_and_justified(|ui| {
+                                        ui.label(
+                                            RichText::new(format!("missing image\n{rel}"))
+                                                .monospace()
+                                                .color(muted),
+                                        );
+                                    });
+                                }
                             });
                     }
                 } else {
@@ -1634,7 +1674,8 @@ impl eframe::App for CelestineApp {
                     };
                     let scroll_heading = self.tabs[tab_idx].scroll_to_heading.clone();
                     let outcome = if let Some(vault) = &self.vault {
-                        let image_rels = vault.list_image_rel_paths();
+                        let image_rels = self.image_rels
+                            .get_or_insert_with(|| vault.list_image_rel_paths());
                         ScrollArea::vertical()
                             .id_salt("preview-scroll")
                             .auto_shrink([false, false])
@@ -1658,15 +1699,16 @@ impl eframe::App for CelestineApp {
                                                 ui,
                                                 &body,
                                                 &rel,
-                                                &vault.root,
+                                                vault.root(),
                                                 &vault.index,
-                                                &image_rels,
+                                                image_rels,
                                                 accent,
                                                 muted,
                                                 text_c,
                                                 md_font,
                                                 scroll_heading.as_deref(),
                                                 &palette.heading,
+                                                &mut self.image_resolver,
                                             )
                                         },
                                     )
@@ -2535,17 +2577,13 @@ fn overlay_scroll_list(ui: &mut Ui, list_h: f32, add_contents: impl FnOnce(&mut 
     );
 }
 
-fn recent_notes_path(vault_root: &Path) -> PathBuf {
-    vault_root.join(".celestine").join("recent-notes.toml")
-}
-
-fn load_recent_notes(vault_root: &Path) -> Vec<String> {
+fn load_recent_notes(vault: &Vault) -> Vec<String> {
     #[derive(serde::Deserialize, Default)]
     struct File {
         #[serde(default)]
         notes: Vec<String>,
     }
-    let Ok(text) = std::fs::read_to_string(recent_notes_path(vault_root)) else {
+    let Ok(text) = vault.read_metadata("recent-notes.toml") else {
         return Vec::new();
     };
     toml::from_str::<File>(&text)
@@ -2553,15 +2591,38 @@ fn load_recent_notes(vault_root: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn save_recent_notes(vault_root: &Path, notes: &[String]) {
+fn save_recent_notes(vault: &Vault, notes: &[String]) {
     #[derive(serde::Serialize)]
     struct File<'a> {
         notes: &'a [String],
     }
-    let dir = vault_root.join(".celestine");
-    let _ = std::fs::create_dir_all(&dir);
     if let Ok(body) = toml::to_string_pretty(&File { notes }) {
-        let _ = std::fs::write(recent_notes_path(vault_root), body);
+        let _ = vault.write_metadata("recent-notes.toml", &body);
+    }
+}
+
+#[cfg(test)]
+mod recent_notes_boundary_tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn recent_notes_do_not_read_or_write_through_external_metadata_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let vault = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let sentinel = outside.path().join("recent-notes.toml");
+        std::fs::write(&sentinel, "notes = [\"outside-secret.md\"]\n").unwrap();
+        symlink(outside.path(), vault.path().join(".celestine")).unwrap();
+
+        let vault = Vault::open(vault.path()).unwrap();
+        assert!(load_recent_notes(&vault).is_empty());
+        save_recent_notes(&vault, &["inside.md".to_string()]);
+        assert_eq!(
+            std::fs::read_to_string(sentinel).unwrap(),
+            "notes = [\"outside-secret.md\"]\n"
+        );
     }
 }
 
@@ -2721,4 +2782,98 @@ fn cmd_from_id(id: &str) -> Option<Command> {
         "prev_tab" => Command::PrevTab,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod note_open_boundary_tests {
+    use super::*;
+
+    // Avoid loading user configuration, persisting app state, or checking releases.
+    fn test_app(vault: Vault) -> CelestineApp {
+        CelestineApp {
+            vault: Some(vault),
+            tabs: Vec::new(),
+            active_tab: 0,
+            former_tab: 0,
+            keymap: Keymap::default(),
+            theme: ThemeTokens::default(),
+            theme_name: "test".into(),
+            overlay: Overlay::None,
+            overlay_query: String::new(),
+            overlay_selected: 0,
+            overlay_anim: 0.0,
+            focus: FocusPane::Editor,
+            show_graph: false,
+            graph: GraphState::new(),
+            status: format!(
+                "open vault {} · recent {} · themes {} · ?",
+                "Mod+Shift+O", "Mod+R", "Mod+T"
+            ),
+            nav_back: Vec::new(),
+            nav_forward: Vec::new(),
+            find_query: String::new(),
+            editor_focused: false,
+            editor_focus_pending: false,
+            last_frame: Instant::now(),
+            persist: AppState::default(),
+            tree_expanded: HashSet::new(),
+            tree_cursor: None,
+            tree_rename: None,
+            outline_collapsed: HashSet::new(),
+            overlay_focus_pending: false,
+            folder_icons: HashMap::new(),
+            recent_notes: Vec::new(),
+            update_checker: UpdateChecker::start("test-disabled"),
+            update_banner_hidden: false,
+            image_resolver: crate::media::ImageResolver::default(),
+            image_rels: None,
+        }
+    }
+
+    #[test]
+    fn opening_a_traversal_link_preserves_outside_file_and_editor_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("Vault");
+        let outside = temp.path().join("Outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(root.join("Home.md"), "# Home").unwrap();
+        let sentinel = outside.join("probe.md");
+        std::fs::write(&sentinel, "outside sentinel").unwrap();
+        let mut app = test_app(Vault::open(&root).unwrap());
+        app.open_note("Home.md", false);
+
+        for rel in ["../Outside/probe.md", "../Outside/new-probe.md"] {
+            app.open_note(rel, true);
+            assert_eq!(app.tabs.len(), 1);
+            assert_eq!(app.tabs[0].rel, "Home.md");
+            assert_eq!(app.tabs[0].buffer, "# Home");
+            assert!(app.nav_back.is_empty());
+            assert!(app.status.starts_with("create failed:"));
+            assert_eq!(
+                std::fs::read_to_string(&sentinel).unwrap(),
+                "outside sentinel"
+            );
+            assert!(!outside.join("new-probe.md").exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opening_a_note_through_internal_symlink_reuses_the_same_tab() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("real")).unwrap();
+        std::fs::write(temp.path().join("real/note.md"), "# Note").unwrap();
+        symlink(temp.path().join("real"), temp.path().join("alias")).unwrap();
+        let mut app = test_app(Vault::open(temp.path()).unwrap());
+        app.open_note("alias/note.md", false);
+        app.tabs[0].buffer.push_str("\nunsaved edit");
+        app.tabs[0].dirty = true;
+        app.open_note("real/note.md", true);
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.tabs[0].rel, "real/note.md");
+        assert!(app.tabs[0].buffer.ends_with("unsaved edit"));
+        assert!(app.tabs[0].dirty);
+    }
 }

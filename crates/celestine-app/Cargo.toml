@@ -27,3 +27,6 @@ pulldown-cmark = { workspace = true }
 regex = { workspace = true }
 emojis = { workspace = true }
 ureq = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

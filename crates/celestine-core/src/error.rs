@@ -9,6 +9,8 @@ pub enum CoreError {
     NotADirectory(PathBuf),
     #[error("note not found: {0}")]
     NoteNotFound(String),
+    #[error("invalid vault path: {0}")]
+    InvalidVaultPath(String),
     #[error("yaml error: {0}")]
     Yaml(#[from] serde_yaml::Error),
 }

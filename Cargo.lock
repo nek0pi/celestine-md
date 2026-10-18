@@ -608,6 +608,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "tempfile",
  "toml",
  "ureq",
 ]
@@ -620,6 +621,7 @@ dependencies = [
  "petgraph 0.7.1",
  "pulldown-cmark",
  "regex",
+ "same-file",
  "serde",
  "serde_yaml",
  "tempfile",

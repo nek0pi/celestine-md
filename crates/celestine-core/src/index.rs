@@ -1,4 +1,5 @@
 use crate::parse::{extract_note_data, Wikilink};
+use crate::path::{canonical_note_target, checked_rel, resolve_vault_abs};
 use crate::CoreError;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -76,11 +77,8 @@ impl VaultIndex {
     }
 
     pub fn upsert_file(&mut self, vault_root: &Path, path: &Path) -> Result<NoteId, CoreError> {
-        let rel = path
-            .strip_prefix(vault_root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .replace('\\', "/");
+        let resolved = resolve_vault_abs(vault_root, path)?;
+        let (path, rel) = canonical_note_target(resolved)?;
         if !rel.to_lowercase().ends_with(".md") {
             return Err(CoreError::NoteNotFound(rel));
         }
@@ -92,7 +90,7 @@ impl VaultIndex {
             return Err(CoreError::NoteNotFound(rel));
         }
 
-        let content = std::fs::read_to_string(path)?;
+        let content = std::fs::read_to_string(&path)?;
         let parsed = extract_note_data(&content);
         let stem = path
             .file_stem()
@@ -150,11 +148,9 @@ impl VaultIndex {
     }
 
     pub fn remove_path(&mut self, vault_root: &Path, path: &Path) {
-        let rel = path
-            .strip_prefix(vault_root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .replace('\\', "/");
+        let Ok(rel) = checked_rel(vault_root, path) else {
+            return;
+        };
         let key = normalize_rel(&rel);
         if let Some(id) = self.by_rel.remove(&key) {
             self.remove_lookups(id);

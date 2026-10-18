@@ -95,7 +95,9 @@ pub fn show_preview(
     font_size: f32,
     scroll_to_heading: Option<&str>,
     heading_palette: &[Color32; 6],
+    image_resolver: &mut media::ImageResolver,
 ) -> PreviewOutcome {
+    image_resolver.set_context(vault_root, note_rel, body);
     let headings = HeadingColors::from_theme(heading_palette);
     let prepared = preprocess(body);
     let mut options = Options::empty();
@@ -182,7 +184,9 @@ pub fn show_preview(
         }
         let mut rt = RichText::new(s).size(size).color(col);
         if code {
-            rt = rt.monospace().background_color(Color32::from_black_alpha(60));
+            rt = rt
+                .monospace()
+                .background_color(Color32::from_black_alpha(60));
         } else {
             rt = rt.family(egui::FontFamily::Proportional);
         }
@@ -297,20 +301,16 @@ pub fn show_preview(
                                 .size(font_size * 0.9)
                                 .color(muted),
                         );
-                    } else if let Some(abs) =
-                        media::resolve_image_abs(vault_root, note_rel, &dest, image_rels)
-                    {
-                        let resp = media::show_fitted_image(ui, &abs, max_w);
+                    } else if let Some(resolved) = image_resolver.resolve(&dest, image_rels) {
+                        let resp = media::show_fitted_image(ui, &resolved.abs, max_w);
                         let tip = if alt.is_empty() {
-                            abs.display().to_string()
+                            resolved.abs.display().to_string()
                         } else {
-                            format!("{alt}\n{}", abs.display())
+                            format!("{alt}\n{}", resolved.abs.display())
                         };
                         let resp = resp.on_hover_text(tip);
                         if resp.clicked() {
-                            if let Some(rel) = media::abs_to_rel(vault_root, &abs) {
-                                open_rel = Some(rel);
-                            }
+                            open_rel = Some(resolved.rel);
                         }
                     } else {
                         ui.label(
@@ -365,10 +365,7 @@ pub fn show_preview(
                     } else if in_table_cell {
                         cell_buf.push(' ');
                     } else {
-                        paragraph_buf.push((
-                            RichText::new(" ").size(font_size),
-                            None,
-                        ));
+                        paragraph_buf.push((RichText::new(" ").size(font_size), None));
                     }
                 }
                 Event::Start(Tag::List(start)) => {
@@ -397,7 +394,12 @@ pub fn show_preview(
                     };
                     ui.horizontal_wrapped(|ui| {
                         ui.add_space((list_depth.saturating_sub(1) as f32) * 14.0);
-                        ui.label(RichText::new(bullet).monospace().color(muted).size(font_size));
+                        ui.label(
+                            RichText::new(bullet)
+                                .monospace()
+                                .color(muted)
+                                .size(font_size),
+                        );
                         ui.spacing_mut().item_spacing.x = 0.0;
                         for (rt, dest) in paragraph_buf.drain(..) {
                             if let Some(d) = dest {
@@ -502,10 +504,7 @@ pub fn show_preview(
                 }
                 Event::TaskListMarker(checked) => {
                     let mark = if checked { "☑ " } else { "☐ " };
-                    paragraph_buf.push((
-                        RichText::new(mark).size(font_size).color(accent),
-                        None,
-                    ));
+                    paragraph_buf.push((RichText::new(mark).size(font_size).color(accent), None));
                 }
                 Event::Html(html) | Event::InlineHtml(html) => {
                     // Strip simple tags; keep text-ish content
@@ -523,7 +522,13 @@ pub fn show_preview(
         flush_paragraph(ui, &mut paragraph_buf, &mut open_rel, index, note_rel);
     });
 
-    let _ = (code_span, FontId::default(), TextStyle::Body, Vec2::ZERO, in_table);
+    let _ = (
+        code_span,
+        FontId::default(),
+        TextStyle::Body,
+        Vec2::ZERO,
+        in_table,
+    );
     PreviewOutcome {
         open_rel,
         heading_rects,
@@ -551,5 +556,23 @@ fn ensure_md(target: &str) -> String {
         target.to_string()
     } else {
         format!("{target}.md")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_destinations_keep_navigation_for_vault_safe_resolution() {
+        let index = VaultIndex::new();
+        assert_eq!(
+            resolve_dest(&index, "notes/page.md", "../images/photo.png"),
+            Some("../images/photo.png".into())
+        );
+        assert_eq!(
+            resolve_dest(&index, "notes/page.md", "../../outside.png"),
+            Some("../../outside.png".into())
+        );
     }
 }

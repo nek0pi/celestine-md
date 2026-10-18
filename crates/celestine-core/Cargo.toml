@@ -10,6 +10,7 @@ serde = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 walkdir = { workspace = true }
+same-file = "1"
 notify = { workspace = true }
 petgraph = { workspace = true }
 regex = { workspace = true }
