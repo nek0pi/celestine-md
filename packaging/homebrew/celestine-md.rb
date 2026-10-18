@@ -10,23 +10,23 @@ class CelestineMd < Formula
   desc "Ultralight Obsidian-inspired Markdown notes (Rust / egui)"
   homepage "https://github.com/nek0pi/celestine-md"
   license "MIT"
-  version "0.3.0"
+  version "0.3.1"
 
   on_macos do
     on_arm do
-      url "https://github.com/nek0pi/celestine-md/releases/download/v0.3.0/celestine-macos-aarch64-v0.3.0.tar.gz"
-      sha256 "abe342945a03929681b915d5cc56fd90c098924c7348ce8c60ea22b411ba004e"
+      url "https://github.com/nek0pi/celestine-md/releases/download/v0.3.1/celestine-macos-aarch64-v0.3.1.tar.gz"
+      sha256 "3191ec43051b0fd9b1a060a84d1b7bdf73937466647648619912d2375918bec1"
     end
     on_intel do
-      url "https://github.com/nek0pi/celestine-md/releases/download/v0.3.0/celestine-macos-x86_64-v0.3.0.tar.gz"
-      sha256 "df19e5b8d2bc15b73b4d4257bae0cd2cfff6063ff50d206bfa4d24ee71aff2ff"
+      url "https://github.com/nek0pi/celestine-md/releases/download/v0.3.1/celestine-macos-x86_64-v0.3.1.tar.gz"
+      sha256 "296401c43db5bf7cd227f0c7f6d82cb67ed69688b9aa14116ca1cb26904a7d6c"
     end
   end
 
   on_linux do
     on_intel do
-      url "https://github.com/nek0pi/celestine-md/releases/download/v0.3.0/celestine-linux-x86_64-v0.3.0.tar.gz"
-      sha256 "1ef0892a4583873b7116d54f72000759d5aec3132492835ca9323864b86d66cb"
+      url "https://github.com/nek0pi/celestine-md/releases/download/v0.3.1/celestine-linux-x86_64-v0.3.1.tar.gz"
+      sha256 "e7f6ee54dda6f6b42e73cd15baab2102cbe9e93bab0406a6a9fff91b50292026"
     end
   end
 
