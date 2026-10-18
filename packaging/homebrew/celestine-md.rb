@@ -11,6 +11,8 @@ class CelestineMd < Formula
   homepage "https://github.com/nek0pi/celestine-md"
   license "MIT"
   version "0.3.1"
+  # Bump when replacing same-version release assets (avoids stale Brew caches).
+  revision 1
 
   on_macos do
     on_arm do
