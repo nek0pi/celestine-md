@@ -1,0 +1,18 @@
+pkgbase = celestine-md
+	pkgdesc = Ultralight Obsidian-inspired Markdown notes (Rust / egui)
+	pkgver = 0.3.0
+	pkgrel = 1
+	url = https://github.com/nek0pi/celestine-md
+	arch = x86_64
+	license = MIT
+	makedepends = cargo
+	makedepends = clang
+	makedepends = pkgconf
+	depends = libxkbcommon
+	depends = libxcb
+	depends = gtk3
+	options = !lto
+	source = celestine-md-0.3.0.tar.gz::https://github.com/nek0pi/celestine-md/archive/refs/tags/v0.3.0.tar.gz
+	sha256sums = b9fc4f15c9a56e11ac5f73eb2900872212e35eb6bf1c4add592aad70b9b24bc8
+
+pkgname = celestine-md
