@@ -116,6 +116,8 @@ pub struct CelestineApp {
     recent_notes: Vec<String>,
     /// Background GitHub release check (feature-line bumps only).
     update_checker: UpdateChecker,
+    /// When set, flush dirty note tabs once this instant is reached.
+    autosave_at: Option<Instant>,
     /// Hide the update banner for this session after dismiss/open.
     update_banner_hidden: bool,
     image_resolver: crate::media::ImageResolver,
@@ -207,10 +209,12 @@ impl CelestineApp {
             image_resolver: crate::media::ImageResolver::default(),
             image_rels: None,
             line_flash: None,
+            autosave_at: None,
         }
     }
 
     fn open_vault(&mut self, path: PathBuf, ctx: &egui::Context) {
+        self.save_all_dirty(false);
         let wake_ctx = ctx.clone();
         match Vault::open_with_wakeup(&path, move || wake_ctx.request_repaint()) {
             Ok(v) => {
@@ -243,6 +247,7 @@ impl CelestineApp {
     }
 
     fn close_vault(&mut self) {
+        self.save_all_dirty(false);
         self.image_resolver.clear();
         self.image_rels = None;
         self.vault = None;
@@ -254,6 +259,7 @@ impl CelestineApp {
         self.nav_back.clear();
         self.nav_forward.clear();
         self.folder_icons.clear();
+        self.autosave_at = None;
         // Keep last_vault so the next launch still restores; clear only the live session.
         self.status = "vault closed — open vault · recent vaults".into();
     }
@@ -450,25 +456,79 @@ impl CelestineApp {
         }
     }
 
-    fn save_active(&mut self) {
+    /// Debounce window after the last edit before writing to disk.
+    const AUTOSAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(400);
+
+    fn mark_dirty(&mut self, tab_idx: usize) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.dirty = true;
+        }
+        self.autosave_at = Some(Instant::now() + Self::AUTOSAVE_DELAY);
+    }
+
+    fn save_tab(&mut self, i: usize, announce: bool) {
         let Some(vault) = self.vault.as_mut() else {
             return;
         };
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+        let Some(tab) = self.tabs.get_mut(i) else {
             return;
         };
-        if tab.kind == TabKind::Image {
-            self.status = "images are read-only".into();
+        if tab.kind == TabKind::Image || !tab.dirty {
+            if tab.kind == TabKind::Image && announce {
+                self.status = "images are read-only".into();
+            }
             return;
         }
-        match vault.write_note(&tab.rel, &tab.buffer) {
+        let rel = tab.rel.clone();
+        let buffer = tab.buffer.clone();
+        match vault.write_note(&rel, &buffer) {
             Ok(()) => {
                 self.image_resolver.clear();
                 self.image_rels = None;
-                tab.dirty = false;
-                self.status = format!("saved {}", tab.rel);
+                if let Some(tab) = self.tabs.get_mut(i) {
+                    tab.dirty = false;
+                }
+                if announce {
+                    self.status = format!("saved {rel}");
+                }
             }
             Err(e) => self.status = format!("save error: {e}"),
+        }
+    }
+
+    fn save_active(&mut self) {
+        self.save_tab(self.active_tab, true);
+        if !self.tabs.iter().any(|t| t.dirty) {
+            self.autosave_at = None;
+        }
+    }
+
+    /// Write every dirty note tab. Used by autosave, tab/vault close, and quit.
+    fn save_all_dirty(&mut self, announce: bool) {
+        let dirty: Vec<usize> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.dirty && t.kind == TabKind::Note)
+            .map(|(i, _)| i)
+            .collect();
+        for i in dirty {
+            self.save_tab(i, announce);
+        }
+        if !self.tabs.iter().any(|t| t.dirty) {
+            self.autosave_at = None;
+        }
+    }
+
+    fn flush_autosave_if_due(&mut self, ctx: &egui::Context) {
+        let Some(due) = self.autosave_at else {
+            return;
+        };
+        let now = Instant::now();
+        if now >= due {
+            self.save_all_dirty(false);
+        } else {
+            ctx.request_repaint_after(due.saturating_duration_since(now));
         }
     }
 
@@ -481,6 +541,8 @@ impl CelestineApp {
         if i >= self.tabs.len() {
             return;
         }
+        // Always persist before discarding the in-memory buffer.
+        self.save_tab(i, false);
         self.tabs.remove(i);
         let len = self.tabs.len();
         let shift = |t: usize| -> usize {
@@ -587,7 +649,10 @@ impl CelestineApp {
             }
             Command::Save => self.save_active(),
             Command::TogglePreview => self.toggle_preview_mode(),
-            Command::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Command::Quit => {
+                self.save_all_dirty(false);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
             Command::Escape => {
                 if self.tree_rename.is_some() {
                     self.tree_rename = None;
@@ -1182,6 +1247,12 @@ impl eframe::App for CelestineApp {
                 self.update_checker.clear();
             }
         }
+
+        self.flush_autosave_if_due(ctx);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_all_dirty(false);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -2015,6 +2086,32 @@ impl eframe::App for CelestineApp {
                                 let mut jump_done = false;
                                 let mut flash_rect: Option<egui::Rect> = None;
                                 let content_top = ui.cursor().min.y;
+                                // (segment index, markdown) — insert after that table.
+                                let mut paste_after_table: Option<(usize, String)> = None;
+                                let mut delete_table_si: Option<usize> = None;
+
+                                // Canonicalize table-shaped pastes (MD / TSV) so the
+                                // multiline editor gets a clean GFM block that will
+                                // segment into a table widget on the next frame.
+                                if editor_live {
+                                    ui.ctx().input_mut(|i| {
+                                        for ev in &mut i.events {
+                                            if let egui::Event::Paste(s) = ev {
+                                                if let Some(norm) =
+                                                    md_table::normalize_table_paste(s)
+                                                {
+                                                    // Lead with a newline so a mid-line
+                                                    // caret still starts the table cleanly.
+                                                    *s = if norm.starts_with('\n') {
+                                                        norm
+                                                    } else {
+                                                        format!("\n{norm}")
+                                                    };
+                                                }
+                                            }
+                                        }
+                                    });
+                                }
 
                                 let row_h_est = (md_font * 1.35).max(1.0);
                                 let fill_rows =
@@ -2164,7 +2261,7 @@ impl eframe::App for CelestineApp {
                                             EditorSeg::Table { table, src_lines } => {
                                                 let table_top = ui.cursor().min.y;
                                                 let mut tbl = table.clone();
-                                                let edited = ui
+                                                let outcome = ui
                                                     .add_enabled_ui(editor_live, |ui| {
                                                         table_ui::show_editable(
                                                             ui,
@@ -2174,9 +2271,15 @@ impl eframe::App for CelestineApp {
                                                         )
                                                     })
                                                     .inner;
-                                                if edited {
+                                                if outcome.changed {
                                                     *table = tbl;
                                                     any_changed = true;
+                                                }
+                                                if let Some(md) = outcome.paste_table {
+                                                    paste_after_table = Some((si, md));
+                                                }
+                                                if outcome.delete_table {
+                                                    delete_table_si = Some(si);
                                                 }
                                                 let table_bottom = ui.cursor().min.y;
                                                 let table_h =
@@ -2308,7 +2411,50 @@ impl eframe::App for CelestineApp {
                                     );
                                 }
 
-                                if any_changed {
+                                if let Some(del_si) = delete_table_si.take() {
+                                    let mut new_buf = String::with_capacity(
+                                        buf_snapshot.len().saturating_sub(32),
+                                    );
+                                    for (i, seg) in work.iter().enumerate() {
+                                        if i == del_si {
+                                            continue;
+                                        }
+                                        match seg {
+                                            EditorSeg::Text(t) => new_buf.push_str(t),
+                                            EditorSeg::Table { table, .. } => {
+                                                new_buf.push_str(&md_table::serialize(table));
+                                            }
+                                        }
+                                    }
+                                    self.tabs[tab_idx].buffer = new_buf;
+                                    any_changed = true;
+                                } else if let Some((si, md)) = paste_after_table.take() {
+                                    // Splice a fresh table block after segment `si`.
+                                    let mut new_buf = String::with_capacity(
+                                        buf_snapshot.len() + md.len() + 8,
+                                    );
+                                    for (i, seg) in work.iter().enumerate() {
+                                        match seg {
+                                            EditorSeg::Text(t) => new_buf.push_str(t),
+                                            EditorSeg::Table { table, .. } => {
+                                                new_buf.push_str(&md_table::serialize(table));
+                                            }
+                                        }
+                                        if i == si {
+                                            if !new_buf.ends_with('\n') {
+                                                new_buf.push('\n');
+                                            }
+                                            new_buf.push('\n');
+                                            new_buf.push_str(md.trim_start_matches('\n'));
+                                            if !new_buf.ends_with('\n') {
+                                                new_buf.push('\n');
+                                            }
+                                            new_buf.push('\n');
+                                        }
+                                    }
+                                    self.tabs[tab_idx].buffer = new_buf;
+                                    any_changed = true;
+                                } else if any_changed {
                                     let mut new_buf = String::with_capacity(
                                         buf_snapshot.len() + 64,
                                     );
@@ -2342,7 +2488,9 @@ impl eframe::App for CelestineApp {
                         if expanded != self.tabs[tab_idx].buffer {
                             self.tabs[tab_idx].buffer = expanded;
                         }
-                        self.tabs[tab_idx].dirty = true;
+                        self.mark_dirty(tab_idx);
+                        // Ensure a frame runs after the debounce even if the user stops typing.
+                        ctx.request_repaint_after(Self::AUTOSAVE_DELAY);
                     }
                 }
                 } // TabKind::Note
@@ -3864,6 +4012,7 @@ mod note_open_boundary_tests {
             image_resolver: crate::media::ImageResolver::default(),
             image_rels: None,
             line_flash: None,
+            autosave_at: None,
         }
     }
 
@@ -3912,6 +4061,23 @@ mod note_open_boundary_tests {
         assert_eq!(app.tabs[0].rel, "real/note.md");
         assert!(app.tabs[0].buffer.ends_with("unsaved edit"));
         assert!(app.tabs[0].dirty);
+    }
+
+    #[test]
+    fn closing_a_dirty_tab_writes_the_buffer_to_disk() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("Note.md"), "# Note\n").unwrap();
+        let mut app = test_app(Vault::open(temp.path()).unwrap());
+        app.open_note("Note.md", false);
+        app.tabs[0].buffer.push_str("\nautosaved line\n");
+        app.tabs[0].dirty = true;
+        app.close_tab(0);
+        let on_disk = std::fs::read_to_string(temp.path().join("Note.md")).unwrap();
+        assert!(
+            on_disk.contains("autosaved line"),
+            "close must flush dirty buffer, got {on_disk:?}"
+        );
+        assert!(app.tabs.is_empty());
     }
 }
 

@@ -169,7 +169,130 @@ pub fn segment_note(buf: &str) -> Vec<Segment> {
             range: 0..buf.len(),
         });
     }
+
+    // A note that *ends* on a table has no trailing text segment. The editor
+    // then expands the *previous* text block to fill the viewport, which pushes
+    // the table off-screen. Always keep an empty caret slot after a final table.
+    if matches!(out.last(), Some(Segment::Table { .. })) {
+        let end = buf.len();
+        out.push(Segment::Text { range: end..end });
+    }
     out
+}
+
+/// True when clipboard text looks like a GFM pipe table (header + separator).
+pub fn looks_like_md_table(s: &str) -> bool {
+    let lines: Vec<&str> = s.lines().map(|l| l.trim_end_matches('\r')).collect();
+    let mut nonempty = lines.iter().copied().filter(|l| !l.trim().is_empty());
+    let Some(header) = nonempty.next() else {
+        return false;
+    };
+    let Some(sep) = nonempty.next() else {
+        return false;
+    };
+    let Some(h) = parse_row(header) else {
+        return false;
+    };
+    let Some(sp) = parse_row(sep) else {
+        return false;
+    };
+    is_separator_row(&sp) && h.len() == sp.len() && h.len() >= 1
+}
+
+/// True when clipboard text looks like a multi-row TSV grid.
+pub fn looks_like_tsv_table(s: &str) -> bool {
+    let rows: Vec<&str> = s
+        .lines()
+        .map(|l| l.trim_end_matches('\r'))
+        .filter(|l| !l.is_empty())
+        .collect();
+    if rows.len() < 2 {
+        return false;
+    }
+    let cols = rows[0].split('\t').count();
+    cols >= 2
+        && rows
+            .iter()
+            .all(|r| r.contains('\t') && r.split('\t').count() == cols)
+}
+
+/// Normalize a table-shaped paste into GFM markdown ready to drop into a note.
+///
+/// Returns `None` when `s` is not a table. Leading/trailing newlines are added so
+/// the block segments cleanly when inserted mid-note (and so single-line cell
+/// fields aren't the paste target — callers should intercept those).
+pub fn normalize_table_paste(s: &str) -> Option<String> {
+    let trimmed = s.trim_matches(|c| c == '\n' || c == '\r' || c == ' ');
+    if trimmed.is_empty() {
+        return None;
+    }
+    let md = if looks_like_md_table(trimmed) {
+        // Re-parse → serialize so separators/spacing are canonical.
+        let wrapped = format!("{trimmed}\n");
+        let segs = segment_note(&wrapped);
+        let table = segs.iter().find_map(|s| match s {
+            Segment::Table { table, .. } => Some(table),
+            _ => None,
+        })?;
+        serialize(table)
+    } else if looks_like_tsv_table(trimmed) {
+        let rows: Vec<Vec<String>> = trimmed
+            .lines()
+            .map(|l| l.trim_end_matches('\r'))
+            .filter(|l| !l.is_empty())
+            .map(|l| l.split('\t').map(|c| c.to_string()).collect())
+            .collect();
+        rows_to_markdown(&rows)
+    } else {
+        return None;
+    };
+    Some(md)
+}
+
+/// Tab-separated values (handy for pasting into spreadsheets).
+pub fn rows_to_tsv(rows: &[Vec<String>]) -> String {
+    let mut out = String::new();
+    for (ri, row) in rows.iter().enumerate() {
+        if ri > 0 {
+            out.push('\n');
+        }
+        for (ci, cell) in row.iter().enumerate() {
+            if ci > 0 {
+                out.push('\t');
+            }
+            for ch in cell.chars() {
+                out.push(if ch == '\n' || ch == '\r' { ' ' } else { ch });
+            }
+        }
+    }
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out
+}
+
+/// Build a temporary [`MdTable`] from raw grid rows (row 0 = header) and serialize.
+pub fn rows_to_markdown(rows: &[Vec<String>]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    let cols = rows.iter().map(|r| r.len()).max().unwrap_or(1).max(1);
+    let mut headers = rows[0].clone();
+    headers.resize(cols, String::new());
+    let body: Vec<Vec<String>> = rows
+        .iter()
+        .skip(1)
+        .map(|r| {
+            let mut c = r.clone();
+            c.resize(cols, String::new());
+            c
+        })
+        .collect();
+    serialize(&MdTable {
+        headers,
+        alignments: vec![Align::None; cols],
+        rows: body,
+    })
 }
 
 /// Serialize a table to GFM pipe Markdown (trailing newline).
@@ -476,5 +599,60 @@ mod tests {
         };
         assert!(table.rows.is_empty());
         assert_eq!(table.headers.len(), 2);
+    }
+
+    #[test]
+    fn demo_performance_md_table() {
+        let src = "# Performance\n\nNative `egui` / `eframe` — no Chromium tax.\n\n| Metric | Target |\n|--------|--------|\n| Idle RAM | ≪ Electron notes apps |\n| Startup | Near-instant |\n| Binary | Single static-ish binary |\n\nRelated: [[Projects/Celestine]]\n";
+        let segs = segment_note(src);
+        assert!(
+            segs.iter().any(|s| matches!(s, Segment::Table { .. })),
+            "expected a table segment, got {segs:?}"
+        );
+    }
+
+    #[test]
+    fn pasted_table_without_surrounding_blank_lines() {
+        let src = "intro\n| A | B |\n| --- | --- |\n| 1 | 2 |\noutro\n";
+        let segs = segment_note(src);
+        assert_eq!(segs.len(), 3, "{segs:?}");
+        assert!(matches!(segs[1], Segment::Table { .. }));
+    }
+
+    #[test]
+    fn rows_to_tsv_and_markdown() {
+        let rows = vec![
+            vec!["A".into(), "B".into()],
+            vec!["1".into(), "2\n3".into()],
+        ];
+        assert_eq!(rows_to_tsv(&rows), "A\tB\n1\t2 3\n");
+        let md = rows_to_markdown(&rows);
+        assert!(md.contains('A') && md.contains("---"), "{md}");
+    }
+
+    #[test]
+    fn normalize_md_and_tsv_paste() {
+        let md = normalize_table_paste("| A | B |\n| --- | --- |\n| 1 | 2 |\n").unwrap();
+        assert!(looks_like_md_table(&md), "{md}");
+        assert!(segment_note(&md).iter().any(|s| matches!(s, Segment::Table { .. })));
+
+        let from_tsv = normalize_table_paste("A\tB\n1\t2\n").unwrap();
+        assert!(looks_like_md_table(&from_tsv), "{from_tsv}");
+        assert!(normalize_table_paste("just a line").is_none());
+    }
+
+    #[test]
+    fn table_at_eof_keeps_trailing_text_slot() {
+        let src = "intro\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n";
+        let segs = segment_note(src);
+        assert!(
+            matches!(segs.last(), Some(Segment::Text { range }) if range.start == range.end),
+            "expected empty trailing text after final table, got {segs:?}"
+        );
+        assert!(segs.iter().any(|s| matches!(s, Segment::Table { .. })));
+        // Last text (not the one before the table) must be the empty EOF slot so
+        // the editor's fill-height expansion lands after the table, not before it.
+        let last_text = segs.iter().rposition(|s| matches!(s, Segment::Text { .. }));
+        assert_eq!(last_text, Some(segs.len() - 1));
     }
 }
