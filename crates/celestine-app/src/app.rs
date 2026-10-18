@@ -53,8 +53,23 @@ struct OpenTab {
     /// Jump outline → editor/preview
     scroll_to_line: Option<usize>,
     scroll_to_heading: Option<String>,
+    /// Prefer this char offset (find / vault search hit) over line/heading.
+    scroll_to_char: Option<usize>,
     editor_text_id: egui::Id,
 }
+
+/// Brief highlight after jumping to a find / search hit.
+struct LineFlash {
+    /// 0-based source line in the note buffer.
+    line_0: usize,
+    /// Text used to locate the block in preview (usually the find query).
+    needle: String,
+    started: Instant,
+    /// Scroll-to-center still pending.
+    do_scroll: bool,
+}
+
+const LINE_FLASH_SECS: f32 = 0.95;
 
 pub struct CelestineApp {
     vault: Option<Vault>,
@@ -99,6 +114,8 @@ pub struct CelestineApp {
     update_banner_hidden: bool,
     image_resolver: crate::media::ImageResolver,
     image_rels: Option<Vec<String>>,
+    /// Fade-out wash on the jumped-to line (edit + preview).
+    line_flash: Option<LineFlash>,
 }
 
 impl CelestineApp {
@@ -183,6 +200,7 @@ impl CelestineApp {
             update_banner_hidden: false,
             image_resolver: crate::media::ImageResolver::default(),
             image_rels: None,
+            line_flash: None,
         }
     }
 
@@ -336,6 +354,7 @@ impl CelestineApp {
             preview_mode: true,
             scroll_to_line: None,
             scroll_to_heading: None,
+            scroll_to_char: None,
             editor_text_id: egui::Id::new(("celestine-image", rel.to_string())),
         });
         self.active_tab = self.tabs.len() - 1;
@@ -403,6 +422,7 @@ impl CelestineApp {
             preview_mode: false,
             scroll_to_line: None,
             scroll_to_heading: None,
+            scroll_to_char: None,
             editor_text_id: egui::Id::new(("celestine-editor", rel.to_string())),
         });
         self.active_tab = self.tabs.len() - 1;
@@ -1158,6 +1178,13 @@ impl eframe::App for CelestineApp {
         let ctx = ui.ctx().clone();
         let dt = self.last_frame.elapsed().as_secs_f32();
         self.last_frame = Instant::now();
+        if let Some(flash) = &self.line_flash {
+            if flash.started.elapsed().as_secs_f32() >= LINE_FLASH_SECS {
+                self.line_flash = None;
+            } else {
+                ctx.request_repaint();
+            }
+        }
         // Overlay fade-in
         if self.overlay != Overlay::None {
             self.overlay_anim = (self.overlay_anim + dt * 8.0).min(1.0);
@@ -1787,6 +1814,16 @@ impl eframe::App for CelestineApp {
                         parsed.body
                     };
                     let scroll_heading = self.tabs[tab_idx].scroll_to_heading.clone();
+                    let flash_alpha = self.line_flash_alpha();
+                    let flash_needle = self
+                        .line_flash
+                        .as_ref()
+                        .map(|f| f.needle.clone());
+                    let scroll_text = self
+                        .line_flash
+                        .as_ref()
+                        .filter(|f| f.do_scroll)
+                        .map(|f| f.needle.clone());
                     let outcome = if let Some(vault) = &self.vault {
                         let image_rels = self.image_rels
                             .get_or_insert_with(|| vault.list_image_rel_paths());
@@ -1797,6 +1834,7 @@ impl eframe::App for CelestineApp {
                             .min_scrolled_height(fill_h)
                             .show(ui, |ui| {
                                 ui.set_min_height(fill_h);
+                                ui.add_space(NOTE_V_PAD);
                                 let inner_w = ui.available_width().max(1.0);
                                 let (pad, text_w) =
                                     note_side_pad(inner_w, 0.0, preferred_pad, MIN_TEXT_W);
@@ -1821,6 +1859,9 @@ impl eframe::App for CelestineApp {
                                                 text_c,
                                                 md_font,
                                                 scroll_heading.as_deref(),
+                                                scroll_text.as_deref(),
+                                                flash_needle.as_deref(),
+                                                flash_alpha.unwrap_or(0.0),
                                                 &palette.heading,
                                                 &mut self.image_resolver,
                                             )
@@ -1828,19 +1869,27 @@ impl eframe::App for CelestineApp {
                                     )
                                     .inner
                                 })
-                                .inner
+                                .inner;
+                                ui.add_space(NOTE_V_PAD);
                             })
                             .inner
                     } else {
                         preview::PreviewOutcome {
                             link: None,
                             heading_rects: vec![],
+                            find_scrolled: false,
                         }
                     };
                     if scroll_heading.is_some() {
                         if let Some(tab) = self.tabs.get_mut(tab_idx) {
                             tab.scroll_to_heading = None;
                             tab.scroll_to_line = None;
+                            tab.scroll_to_char = None;
+                        }
+                    }
+                    if outcome.find_scrolled {
+                        if let Some(flash) = self.line_flash.as_mut() {
+                            flash.do_scroll = false;
                         }
                     }
                     if let Some(link) = outcome.link {
@@ -1849,18 +1898,28 @@ impl eframe::App for CelestineApp {
                 } else {
                     let font = FontId::monospace(md_font);
                     let text_id = self.tabs[tab_idx].editor_text_id;
+                    let jump_char_direct = self.tabs[tab_idx].scroll_to_char.take();
                     let jump_line = self.tabs[tab_idx].scroll_to_line.take();
                     let jump_heading = self.tabs[tab_idx].scroll_to_heading.take();
-                    let jump_char = jump_heading
-                        .as_deref()
-                        .and_then(|h| {
-                            char_offset_for_heading(&self.tabs[tab_idx].buffer, h)
-                        })
-                        .or_else(|| {
-                            jump_line.map(|line| {
-                                char_offset_at_line(&self.tabs[tab_idx].buffer, line)
+                    let jump_char = jump_char_direct.or_else(|| {
+                        jump_heading
+                            .as_deref()
+                            .and_then(|h| {
+                                char_offset_for_heading(&self.tabs[tab_idx].buffer, h)
                             })
-                        });
+                            .or_else(|| {
+                                jump_line.map(|line| {
+                                    char_offset_at_line(&self.tabs[tab_idx].buffer, line)
+                                })
+                            })
+                    });
+                    let flash_alpha = self.line_flash_alpha();
+                    let flash_line_0 = self.line_flash.as_ref().map(|f| f.line_0);
+                    let flash_do_scroll = self
+                        .line_flash
+                        .as_ref()
+                        .map(|f| f.do_scroll)
+                        .unwrap_or(false);
                     let gutter_w = line_gutter_width(stats.lines, md_font);
                     let gutter_gap = 6.0_f32;
                     let row_h = (md_font * 1.35).max(1.0);
@@ -1940,14 +1999,62 @@ impl eframe::App for CelestineApp {
                                         CCursorRange::one(CCursor::new(char_pos)),
                                     ));
                                     out.state.store(ui.ctx(), id);
-                                    ui.scroll_to_cursor(Some(egui::Align::TOP));
+                                    ui.scroll_to_cursor(Some(egui::Align::Center));
                                     self.editor_focus_pending = false;
+                                    if let Some(flash) = self.line_flash.as_mut() {
+                                        flash.do_scroll = false;
+                                    }
+                                } else if flash_do_scroll {
+                                    if let Some(line_0) = flash_line_0 {
+                                        if let Some(rect) = source_line_rect(
+                                            &out.galley,
+                                            out.galley_pos,
+                                            line_0,
+                                            text_w,
+                                        ) {
+                                            ui.scroll_to_rect(
+                                                rect,
+                                                Some(egui::Align::Center),
+                                            );
+                                        }
+                                    }
+                                    if let Some(flash) = self.line_flash.as_mut() {
+                                        flash.do_scroll = false;
+                                    }
+                                    if self.editor_focus_pending && editor_live {
+                                        out.response.request_focus();
+                                        self.editor_focus_pending = false;
+                                    }
                                 } else if self.editor_focus_pending && editor_live {
                                     out.response.request_focus();
                                     self.editor_focus_pending = false;
                                 }
                                 if !editor_live {
                                     out.response.surrender_focus();
+                                }
+
+                                if let (Some(alpha), Some(line_0)) =
+                                    (flash_alpha, flash_line_0)
+                                {
+                                    if let Some(rect) = source_line_rect(
+                                        &out.galley,
+                                        out.galley_pos,
+                                        line_0,
+                                        text_w,
+                                    ) {
+                                        // Soft wash — keep text readable.
+                                        let a = (alpha * 55.0).clamp(0.0, 255.0) as u8;
+                                        ui.painter().rect_filled(
+                                            rect.expand2(egui::vec2(4.0, 1.0)),
+                                            3.0,
+                                            egui::Color32::from_rgba_unmultiplied(
+                                                accent.r(),
+                                                accent.g(),
+                                                accent.b(),
+                                                a,
+                                            ),
+                                        );
+                                    }
                                 }
 
                                 let gutter_rect = egui::Rect::from_min_size(
@@ -2082,8 +2189,9 @@ impl CelestineApp {
                         Overlay::RecentVaults => {
                             self.ui_recent_vaults(ui, ctx, accent, muted, list_h)
                         }
-                        Overlay::Find => self.ui_find(ui),
-                        Overlay::QuickOpen | Overlay::CommandPalette | Overlay::VaultSearch => {
+                        Overlay::Find => self.ui_find(ui, accent, muted, list_h),
+                        Overlay::VaultSearch => self.ui_vault_search(ui, accent, muted, list_h),
+                        Overlay::QuickOpen | Overlay::CommandPalette => {
                             self.ui_fuzzy(ui, accent, muted, list_h);
                         }
                         Overlay::None => {}
@@ -2430,7 +2538,24 @@ impl CelestineApp {
         }
     }
 
-    fn ui_find(&mut self, ui: &mut Ui) {
+    fn line_flash_alpha(&self) -> Option<f32> {
+        let flash = self.line_flash.as_ref()?;
+        let t = flash.started.elapsed().as_secs_f32();
+        if t >= LINE_FLASH_SECS {
+            return None;
+        }
+        let u = 1.0 - t / LINE_FLASH_SECS;
+        // Ease-out so the wash is strongest right after the jump.
+        Some(u * u)
+    }
+
+    fn ui_find(
+        &mut self,
+        ui: &mut Ui,
+        accent: egui::Color32,
+        muted: egui::Color32,
+        list_h: f32,
+    ) {
         let resp = ui.add(
             TextEdit::singleline(&mut self.find_query)
                 .id(egui::Id::new("celestine-find"))
@@ -2441,10 +2566,202 @@ impl CelestineApp {
             resp.request_focus();
             self.overlay_focus_pending = false;
         }
-        if let Some(tab) = self.tabs.get(self.active_tab) {
-            if !self.find_query.is_empty() {
-                let count = tab.buffer.matches(&self.find_query).count();
-                ui.label(RichText::new(format!("{count} matches")).monospace());
+
+        let hits: Vec<(usize, usize, String)> = self
+            .tabs
+            .get(self.active_tab)
+            .filter(|t| t.kind == TabKind::Note)
+            .map(|t| find_in_buffer_hits(&t.buffer, &self.find_query))
+            .unwrap_or_default();
+
+        if !self.find_query.is_empty() {
+            ui.label(
+                RichText::new(format!("{} matches", hits.len()))
+                    .monospace()
+                    .color(muted),
+            );
+        }
+
+        if self.overlay_selected >= hits.len() && !hits.is_empty() {
+            self.overlay_selected = hits.len() - 1;
+        }
+
+        if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+            self.overlay_selected = (self.overlay_selected + 1).min(hits.len().saturating_sub(1));
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+            self.overlay_selected = self.overlay_selected.saturating_sub(1);
+        }
+
+        let mut chosen: Option<usize> = None;
+        overlay_scroll_list(ui, list_h, |ui| {
+            for (i, (_char_off, line_1based, snippet)) in hits.iter().enumerate() {
+                let selected = i == self.overlay_selected;
+                let row = format!("L{line_1based}  {snippet}");
+                let resp = ui.add(
+                    egui::Button::new(
+                        RichText::new(row)
+                            .monospace()
+                            .color(if selected { accent } else { muted }),
+                    )
+                    .frame(false)
+                    .selected(selected),
+                );
+                if selected {
+                    resp.scroll_to_me(Some(egui::Align::Center));
+                }
+                if resp.clicked() {
+                    chosen = Some(i);
+                }
+            }
+        });
+
+        if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            if !hits.is_empty() {
+                chosen = Some(self.overlay_selected.min(hits.len() - 1));
+            }
+        }
+
+        if let Some(i) = chosen {
+            if let Some((_char_off, line_1based, _snippet)) = hits.get(i) {
+                let line_0 = line_1based.saturating_sub(1);
+                let needle = self.find_query.trim().to_string();
+                let (end_char, in_preview) = self
+                    .tabs
+                    .get(self.active_tab)
+                    .map(|t| {
+                        (
+                            char_offset_end_of_line(&t.buffer, line_0),
+                            t.preview_mode,
+                        )
+                    })
+                    .unwrap_or((0, false));
+                self.overlay = Overlay::None;
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    if in_preview {
+                        // Preview scrolls via line_flash needle; don't leave a
+                        // stale caret jump for when the user toggles edit later.
+                        tab.scroll_to_char = None;
+                    } else {
+                        // Caret at end of the matched line for quick editing.
+                        tab.scroll_to_char = Some(end_char);
+                    }
+                    tab.scroll_to_line = None;
+                    tab.scroll_to_heading = None;
+                }
+                self.line_flash = Some(LineFlash {
+                    line_0,
+                    needle,
+                    started: Instant::now(),
+                    do_scroll: true,
+                });
+                self.focus = FocusPane::Editor;
+                self.editor_focus_pending = !in_preview;
+            }
+        }
+    }
+
+    fn ui_vault_search(
+        &mut self,
+        ui: &mut Ui,
+        accent: egui::Color32,
+        muted: egui::Color32,
+        list_h: f32,
+    ) {
+        let resp = ui.add(
+            TextEdit::singleline(&mut self.overlay_query)
+                .id(egui::Id::new("celestine-vault-search"))
+                .hint_text("search notes — names and contents")
+                .desired_width(f32::INFINITY),
+        );
+        if self.overlay_focus_pending {
+            resp.request_focus();
+            self.overlay_focus_pending = false;
+        }
+
+        let hits = if let Some(vault) = &self.vault {
+            collect_vault_search_hits(vault, &self.overlay_query, &self.recent_notes)
+        } else {
+            Vec::new()
+        };
+
+        if self.overlay_selected >= hits.len() && !hits.is_empty() {
+            self.overlay_selected = hits.len() - 1;
+        }
+
+        if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+            self.overlay_selected = (self.overlay_selected + 1).min(hits.len().saturating_sub(1));
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+            self.overlay_selected = self.overlay_selected.saturating_sub(1);
+        }
+
+        let mut chosen: Option<usize> = None;
+        overlay_scroll_list(ui, list_h, |ui| {
+            for (i, hit) in hits.iter().enumerate() {
+                let selected = i == self.overlay_selected;
+                let row = if hit.snippet.is_empty() {
+                    hit.rel.clone()
+                } else {
+                    format!("{}  {}", hit.rel, hit.snippet)
+                };
+                let resp = ui.add(
+                    egui::Button::new(
+                        RichText::new(row)
+                            .monospace()
+                            .color(if selected { accent } else { muted }),
+                    )
+                    .frame(false)
+                    .selected(selected),
+                );
+                if selected {
+                    resp.scroll_to_me(Some(egui::Align::Center));
+                }
+                if resp.clicked() {
+                    chosen = Some(i);
+                }
+            }
+        });
+
+        if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            if !hits.is_empty() {
+                chosen = Some(self.overlay_selected.min(hits.len() - 1));
+            }
+        }
+
+        if let Some(i) = chosen {
+            if let Some(hit) = hits.get(i) {
+                let rel = hit.rel.clone();
+                let line_0 = hit.line_1based.saturating_sub(1);
+                let needle = if self.overlay_query.trim().is_empty() {
+                    hit.snippet.clone()
+                } else {
+                    self.overlay_query.trim().to_string()
+                };
+                self.overlay = Overlay::None;
+                self.open_path(&rel, true);
+                let end_char = self
+                    .tabs
+                    .get(self.active_tab)
+                    .map(|t| char_offset_end_of_line(&t.buffer, line_0));
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    if let Some(end) = end_char {
+                        tab.scroll_to_char = Some(end);
+                        tab.scroll_to_line = None;
+                    } else {
+                        tab.scroll_to_line = Some(line_0);
+                        tab.scroll_to_char = None;
+                    }
+                    tab.scroll_to_heading = None;
+                }
+                self.line_flash = Some(LineFlash {
+                    line_0,
+                    needle,
+                    started: Instant::now(),
+                    do_scroll: true,
+                });
+                self.focus = FocusPane::Editor;
+                self.editor_focus_pending = true;
             }
         }
     }
@@ -2480,7 +2797,7 @@ impl CelestineApp {
         let empty_q = self.overlay_query.is_empty();
 
         match self.overlay {
-            Overlay::QuickOpen | Overlay::VaultSearch => {
+            Overlay::QuickOpen => {
                 if let Some(vault) = &self.vault {
                     for n in vault.index.notes() {
                         let hay = format!("{} {}", n.rel, n.aliases.join(" "));
@@ -2499,9 +2816,7 @@ impl CelestineApp {
                             })
                         };
                         if let Some(s) = score {
-                            let preview = if self.overlay == Overlay::VaultSearch {
-                                n.body.lines().next().unwrap_or("").to_string()
-                            } else if recency_rank(&n.rel).is_some() && empty_q {
+                            let preview = if recency_rank(&n.rel).is_some() && empty_q {
                                 "recent".into()
                             } else {
                                 n.aliases.first().cloned().unwrap_or_default()
@@ -2509,30 +2824,27 @@ impl CelestineApp {
                             items.push((s, n.rel.clone(), preview));
                         }
                     }
-                    // Quick open also surfaces vault images.
-                    if self.overlay == Overlay::QuickOpen {
-                        for rel in vault.list_image_rel_paths() {
-                            let score = if empty_q {
-                                Some(match recency_rank(&rel) {
-                                    Some(i) => 1_000_000 - i as i64,
-                                    None => 0,
-                                })
+                    for rel in vault.list_image_rel_paths() {
+                        let score = if empty_q {
+                            Some(match recency_rank(&rel) {
+                                Some(i) => 1_000_000 - i as i64,
+                                None => 0,
+                            })
+                        } else {
+                            matcher.fuzzy_match(&rel, &self.overlay_query).map(|s| {
+                                let boost = recency_rank(&rel)
+                                    .map(|i| ((48 - i.min(48)) as i64) * 8)
+                                    .unwrap_or(0);
+                                s + boost
+                            })
+                        };
+                        if let Some(s) = score {
+                            let tag = if recency_rank(&rel).is_some() && empty_q {
+                                "recent · image"
                             } else {
-                                matcher.fuzzy_match(&rel, &self.overlay_query).map(|s| {
-                                    let boost = recency_rank(&rel)
-                                        .map(|i| ((48 - i.min(48)) as i64) * 8)
-                                        .unwrap_or(0);
-                                    s + boost
-                                })
+                                "image"
                             };
-                            if let Some(s) = score {
-                                let tag = if recency_rank(&rel).is_some() && empty_q {
-                                    "recent · image"
-                                } else {
-                                    "image"
-                                };
-                                items.push((s, rel, tag.into()));
-                            }
+                            items.push((s, rel, tag.into()));
                         }
                     }
                 }
@@ -2730,6 +3042,199 @@ mod recent_notes_boundary_tests {
     }
 }
 
+/// Case-insensitive substring hits in a note buffer.
+/// Returns `(char_offset, line_1based, snippet)`.
+fn find_in_buffer_hits(buffer: &str, query: &str) -> Vec<(usize, usize, String)> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Vec::new();
+    }
+    let q_lower = q.to_lowercase();
+    let q_chars = q_lower.chars().count();
+    let mut hits = Vec::new();
+    let mut char_at_line_start = 0usize;
+
+    for (line_idx, line) in buffer.split_inclusive('\n').enumerate() {
+        let line_text = line.trim_end_matches(['\n', '\r']);
+        let line_lower = line_text.to_lowercase();
+        let mut search_from = 0usize;
+        while let Some(rel) = line_lower[search_from..].find(&q_lower) {
+            let match_byte = search_from + rel;
+            let match_char_in_line = line_lower[..match_byte].chars().count();
+            let char_off = char_at_line_start + match_char_in_line;
+            hits.push((
+                char_off,
+                line_idx + 1,
+                truncate_snippet(line_text, 96),
+            ));
+            // Advance by one char so overlapping matches still surface.
+            let advance = q_chars.max(1);
+            let mut chars = line_lower[match_byte..].chars();
+            let mut byte_adv = 0;
+            for _ in 0..advance {
+                if let Some(c) = chars.next() {
+                    byte_adv += c.len_utf8();
+                }
+            }
+            search_from = match_byte + byte_adv.max(1);
+            if search_from >= line_lower.len() {
+                break;
+            }
+        }
+        char_at_line_start += line.chars().count();
+    }
+    hits
+}
+
+struct VaultSearchHit {
+    score: i64,
+    rel: String,
+    line_1based: usize,
+    snippet: String,
+}
+
+const VAULT_SEARCH_MAX_HITS: usize = 150;
+const VAULT_SEARCH_MAX_PER_NOTE: usize = 3;
+
+fn collect_vault_search_hits(
+    vault: &Vault,
+    query: &str,
+    recent: &[String],
+) -> Vec<VaultSearchHit> {
+    let matcher = SkimMatcherV2::default();
+    let empty_q = query.trim().is_empty();
+    let recency_rank = |rel: &str| -> Option<usize> { recent.iter().position(|r| r == rel) };
+    let mut hits: Vec<VaultSearchHit> = Vec::new();
+
+    for n in vault.index.notes() {
+        if empty_q {
+            let score = match recency_rank(&n.rel) {
+                Some(i) => 1_000_000 - i as i64,
+                None => 0,
+            };
+            let snippet = n
+                .body
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("")
+                .to_string();
+            hits.push(VaultSearchHit {
+                score,
+                rel: n.rel.clone(),
+                line_1based: 1,
+                snippet: truncate_snippet(&snippet, 96),
+            });
+            continue;
+        }
+
+        let hay = format!("{} {}", n.rel, n.aliases.join(" "));
+        let path_score = matcher.fuzzy_match(&hay, query).map(|s| {
+            let boost = recency_rank(&n.rel)
+                .map(|i| ((48 - i.min(48)) as i64) * 8)
+                .unwrap_or(0);
+            s + boost
+        });
+
+        let mut line_hits: Vec<(i64, usize, String)> = Vec::new();
+        for (line_idx, line) in n.content.split_inclusive('\n').enumerate() {
+            let line_text = line.trim_end_matches(['\n', '\r']);
+            if line_text.trim().is_empty() {
+                continue;
+            }
+            if let Some(s) = matcher.fuzzy_match(line_text, query) {
+                let boost = recency_rank(&n.rel)
+                    .map(|i| ((48 - i.min(48)) as i64) * 4)
+                    .unwrap_or(0);
+                line_hits.push((
+                    s + boost,
+                    line_idx + 1,
+                    truncate_snippet(line_text, 96),
+                ));
+            }
+        }
+        line_hits.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        line_hits.truncate(VAULT_SEARCH_MAX_PER_NOTE);
+
+        if line_hits.is_empty() {
+            if let Some(s) = path_score {
+                let snippet = n
+                    .body
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("")
+                    .to_string();
+                hits.push(VaultSearchHit {
+                    score: s,
+                    rel: n.rel.clone(),
+                    line_1based: 1,
+                    snippet: truncate_snippet(&snippet, 96),
+                });
+            }
+        } else {
+            for (s, line_1based, snippet) in line_hits {
+                // Prefer content hits; boost if path also matched.
+                let score = if path_score.is_some() { s + 40 } else { s };
+                hits.push(VaultSearchHit {
+                    score,
+                    rel: n.rel.clone(),
+                    line_1based,
+                    snippet,
+                });
+            }
+        }
+    }
+
+    hits.sort_by(|a, b| b.score.cmp(&a.score).then(a.rel.cmp(&b.rel)));
+    hits.truncate(VAULT_SEARCH_MAX_HITS);
+    hits
+}
+
+fn truncate_snippet(s: &str, max_chars: usize) -> String {
+    let trimmed = s.trim();
+    let count = trimmed.chars().count();
+    if count <= max_chars {
+        return trimmed.to_string();
+    }
+    let mut out: String = trimmed.chars().take(max_chars.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+#[cfg(test)]
+mod search_helpers_tests {
+    use super::*;
+
+    #[test]
+    fn find_in_buffer_hits_case_insensitive_with_line_and_offset() {
+        let buf = "Hello World\nfoo BAR baz\n";
+        let hits = find_in_buffer_hits(buf, "bar");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].1, 2);
+        assert!(hits[0].2.to_lowercase().contains("bar"));
+        // "Hello World\n" = 12 chars; "foo " = 4 → offset 16
+        assert_eq!(hits[0].0, 16);
+    }
+
+    #[test]
+    fn vault_search_finds_body_content_not_just_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("alpha.md"),
+            "---\ntitle: Alpha\n---\n\nUniqueZebraPhrase lives here.\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("beta.md"), "nothing interesting\n").unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
+        let hits = collect_vault_search_hits(&vault, "UniqueZebraPhrase", &[]);
+        assert!(
+            hits.iter().any(|h| h.rel == "alpha.md"),
+            "expected alpha.md in hits: {:?}",
+            hits.iter().map(|h| &h.rel).collect::<Vec<_>>()
+        );
+        assert!(hits.iter().any(|h| h.snippet.contains("UniqueZebraPhrase")));
+    }
+}
+
 fn char_offset_at_line(text: &str, line: usize) -> usize {
     let mut chars = 0usize;
     for (i, l) in text.split_inclusive('\n').enumerate() {
@@ -2739,6 +3244,59 @@ fn char_offset_at_line(text: &str, line: usize) -> usize {
         chars += l.chars().count();
     }
     chars
+}
+
+/// Char offset of the end of `line` (0-based), before the trailing newline.
+fn char_offset_end_of_line(text: &str, line: usize) -> usize {
+    let mut chars = 0usize;
+    for (i, l) in text.split_inclusive('\n').enumerate() {
+        if i == line {
+            let content = l.trim_end_matches(['\n', '\r']);
+            return chars + content.chars().count();
+        }
+        chars += l.chars().count();
+    }
+    chars
+}
+
+/// Screen rect covering source line `line_0` in a laid-out editor galley.
+fn source_line_rect(
+    galley: &egui::Galley,
+    galley_pos: egui::Pos2,
+    line_0: usize,
+    width: f32,
+) -> Option<egui::Rect> {
+    let mut src_line = 0usize;
+    let mut at_line_start = true;
+    let mut min_y = f32::MAX;
+    let mut max_y = f32::MIN;
+    let mut found = false;
+    for row in &galley.rows {
+        if at_line_start && src_line == line_0 {
+            found = true;
+        }
+        if found && src_line == line_0 {
+            let r = row.rect();
+            min_y = min_y.min(r.min.y);
+            max_y = max_y.max(r.max.y);
+        }
+        if row.ends_with_newline {
+            if found && src_line == line_0 {
+                break;
+            }
+            src_line += 1;
+            at_line_start = true;
+        } else {
+            at_line_start = false;
+        }
+    }
+    if !found || min_y > max_y {
+        return None;
+    }
+    Some(egui::Rect::from_min_max(
+        egui::pos2(galley_pos.x, galley_pos.y + min_y),
+        egui::pos2(galley_pos.x + width.max(1.0), galley_pos.y + max_y),
+    ))
 }
 
 fn char_offset_for_heading(text: &str, heading: &str) -> Option<usize> {
@@ -2938,6 +3496,7 @@ mod note_open_boundary_tests {
             update_banner_hidden: false,
             image_resolver: crate::media::ImageResolver::default(),
             image_rels: None,
+            line_flash: None,
         }
     }
 

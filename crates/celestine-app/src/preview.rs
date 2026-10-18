@@ -1,6 +1,7 @@
 use crate::media::{self, is_image_target};
+use crate::theme_apply::mix;
 use celestine_core::{has_uri_scheme, resolve_link, ResolvedLink, VaultIndex};
-use egui::{Color32, FontId, RichText, Sense, Stroke, TextStyle, Ui, Vec2};
+use egui::{Color32, FontId, Frame, Margin, RichText, Sense, Stroke, TextStyle, Ui, Vec2};
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use regex::Regex;
 use std::path::Path;
@@ -11,6 +12,8 @@ pub struct PreviewOutcome {
     pub link: Option<LinkTarget>,
     /// Heading text that was rendered this frame (for scroll targets).
     pub heading_rects: Vec<(usize, egui::Rect)>, // line index approx via counter
+    /// True when a find/search scroll target was scrolled into view this frame.
+    pub find_scrolled: bool,
 }
 
 /// Where a clicked preview link leads.
@@ -80,6 +83,37 @@ fn slug(s: &str) -> String {
         }
     }
     out.trim_matches('-').to_string()
+}
+
+fn apply_find_focus(
+    ui: &Ui,
+    rect: egui::Rect,
+    plain: &str,
+    scroll_needle: &Option<String>,
+    flash_needle: &Option<String>,
+    flash_alpha: f32,
+    accent: Color32,
+    find_scrolled: &mut bool,
+) {
+    let p = plain.to_lowercase();
+    let flash_hit = flash_needle
+        .as_ref()
+        .is_some_and(|n| p.contains(n.as_str()));
+    let scroll_hit = scroll_needle
+        .as_ref()
+        .is_some_and(|n| p.contains(n.as_str()));
+    if flash_hit && flash_alpha > 0.01 {
+        let a = (flash_alpha * 55.0).clamp(0.0, 255.0) as u8;
+        ui.painter().rect_filled(
+            rect.expand(3.0),
+            4.0,
+            Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), a),
+        );
+    }
+    if scroll_hit && !*find_scrolled {
+        ui.scroll_to_rect(rect, Some(egui::Align::Center));
+        *find_scrolled = true;
+    }
 }
 
 struct HeadingColors {
@@ -166,6 +200,11 @@ pub fn show_preview(
     text: Color32,
     font_size: f32,
     scroll_to_heading: Option<&str>,
+    // One-shot: scroll so a block containing this text is centered.
+    scroll_to_text: Option<&str>,
+    // While non-empty and `flash_alpha` > 0, wash matching blocks.
+    flash_text: Option<&str>,
+    flash_alpha: f32,
     heading_palette: &[Color32; 6],
     image_resolver: &mut media::ImageResolver,
 ) -> PreviewOutcome {
@@ -183,6 +222,15 @@ pub fn show_preview(
     let mut link: Option<LinkTarget> = None;
     let mut heading_rects = Vec::new();
     let mut heading_counter = 0usize;
+    let mut find_scrolled = false;
+    let scroll_needle = scroll_to_text
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_lowercase());
+    let flash_needle = flash_text
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_lowercase());
 
     // Style state
     let mut bold = false;
@@ -207,14 +255,16 @@ pub fn show_preview(
     let mut image_alt = String::new();
 
     let flush_paragraph = |ui: &mut Ui,
-                           buf: &mut Vec<(RichText, Option<String>)>,
-                           open: &mut Option<LinkTarget>,
-                           index: &VaultIndex,
-                           note_rel: &str| {
+                               buf: &mut Vec<(RichText, Option<String>)>,
+                               open: &mut Option<LinkTarget>,
+                               index: &VaultIndex,
+                               note_rel: &str,
+                               find_scrolled: &mut bool| {
         if buf.is_empty() {
             return;
         }
-        ui.horizontal_wrapped(|ui| {
+        let plain: String = buf.iter().map(|(r, _)| r.text().to_string()).collect();
+        let resp = ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             for (rt, dest) in buf.drain(..) {
                 if let Some(d) = dest {
@@ -230,7 +280,18 @@ pub fn show_preview(
                 }
             }
         });
-        ui.add_space(4.0);
+        apply_find_focus(
+            ui,
+            resp.response.rect,
+            &plain,
+            &scroll_needle,
+            &flash_needle,
+            flash_alpha,
+            accent,
+            find_scrolled,
+        );
+        // Breathing room between paragraphs / sentence blocks in preview.
+        ui.add_space(20.0);
     };
 
     let style_text = |s: &str,
@@ -292,11 +353,19 @@ pub fn show_preview(
                                     &mut link,
                                     index,
                                     note_rel,
+                                    &mut find_scrolled,
                                 );
                             });
                         });
                     } else {
-                        flush_paragraph(ui, &mut paragraph_buf, &mut link, index, note_rel);
+                        flush_paragraph(
+                            ui,
+                            &mut paragraph_buf,
+                            &mut link,
+                            index,
+                            note_rel,
+                            &mut find_scrolled,
+                        );
                     }
                 }
                 Event::Start(Tag::Heading { level, .. }) => {
@@ -326,9 +395,19 @@ pub fn show_preview(
                     heading_counter += 1;
                     if let Some(m) = &heading_match {
                         if m.matches(&plain) {
-                            resp.scroll_to_me(Some(egui::Align::TOP));
+                            resp.scroll_to_me(Some(egui::Align::Center));
                         }
                     }
+                    apply_find_focus(
+                        ui,
+                        resp.rect,
+                        &plain,
+                        &scroll_needle,
+                        &flash_needle,
+                        flash_alpha,
+                        accent,
+                        &mut find_scrolled,
+                    );
                     ui.add_space(6.0);
                     paragraph_buf.clear();
                     heading_level = None;
@@ -360,7 +439,7 @@ pub fn show_preview(
                     link_dest = None;
                 }
                 Event::Start(Tag::Image { dest_url, .. }) => {
-                    flush_paragraph(ui, &mut paragraph_buf, &mut link, index, note_rel);
+                    flush_paragraph(ui, &mut paragraph_buf, &mut link, index, note_rel, &mut find_scrolled);
                     image_dest = Some(dest_url.to_string());
                     image_alt.clear();
                 }
@@ -442,7 +521,7 @@ pub fn show_preview(
                     }
                 }
                 Event::Start(Tag::List(start)) => {
-                    flush_paragraph(ui, &mut paragraph_buf, &mut link, index, note_rel);
+                    flush_paragraph(ui, &mut paragraph_buf, &mut link, index, note_rel, &mut find_scrolled);
                     list_depth += 1;
                     ordered_list = start.is_some();
                     item_index = start.unwrap_or(1) as u32;
@@ -465,7 +544,11 @@ pub fn show_preview(
                     } else {
                         "• ".into()
                     };
-                    ui.horizontal_wrapped(|ui| {
+                    let plain: String = paragraph_buf
+                        .iter()
+                        .map(|(r, _)| r.text().to_string())
+                        .collect();
+                    let resp = ui.horizontal_wrapped(|ui| {
                         ui.add_space((list_depth.saturating_sub(1) as f32) * 14.0);
                         ui.label(
                             RichText::new(bullet)
@@ -487,9 +570,19 @@ pub fn show_preview(
                             }
                         }
                     });
+                    apply_find_focus(
+                        ui,
+                        resp.response.rect,
+                        &plain,
+                        &scroll_needle,
+                        &flash_needle,
+                        flash_alpha,
+                        accent,
+                        &mut find_scrolled,
+                    );
                 }
                 Event::Start(Tag::BlockQuote(_)) => {
-                    flush_paragraph(ui, &mut paragraph_buf, &mut link, index, note_rel);
+                    flush_paragraph(ui, &mut paragraph_buf, &mut link, index, note_rel, &mut find_scrolled);
                     in_blockquote = true;
                 }
                 Event::End(TagEnd::BlockQuote(_)) => {
@@ -497,7 +590,7 @@ pub fn show_preview(
                     ui.add_space(4.0);
                 }
                 Event::Start(Tag::CodeBlock(kind)) => {
-                    flush_paragraph(ui, &mut paragraph_buf, &mut link, index, note_rel);
+                    flush_paragraph(ui, &mut paragraph_buf, &mut link, index, note_rel, &mut find_scrolled);
                     in_code_block = true;
                     code_buf.clear();
                     let _ = kind;
@@ -505,14 +598,15 @@ pub fn show_preview(
                 Event::End(TagEnd::CodeBlock) => {
                     in_code_block = false;
                     let code = std::mem::take(&mut code_buf);
-                    egui::Frame::new()
+                    let plain = code.trim_end().to_string();
+                    let resp = egui::Frame::new()
                         .fill(Color32::from_black_alpha(80))
                         .inner_margin(8)
                         .stroke(Stroke::new(1.0_f32, muted.gamma_multiply(0.4)))
                         .show(ui, |ui| {
                             ui.add(
                                 egui::Label::new(
-                                    RichText::new(code.trim_end())
+                                    RichText::new(&plain)
                                         .monospace()
                                         .size(font_size * 0.92)
                                         .color(text),
@@ -520,10 +614,20 @@ pub fn show_preview(
                                 .selectable(true),
                             );
                         });
+                    apply_find_focus(
+                        ui,
+                        resp.response.rect,
+                        &plain,
+                        &scroll_needle,
+                        &flash_needle,
+                        flash_alpha,
+                        accent,
+                        &mut find_scrolled,
+                    );
                     ui.add_space(8.0);
                 }
                 Event::Start(Tag::Table(_)) => {
-                    flush_paragraph(ui, &mut paragraph_buf, &mut link, index, note_rel);
+                    flush_paragraph(ui, &mut paragraph_buf, &mut link, index, note_rel, &mut find_scrolled);
                     in_table = true;
                     table_rows.clear();
                 }
@@ -531,25 +635,75 @@ pub fn show_preview(
                     in_table = false;
                     if !table_rows.is_empty() {
                         let cols = table_rows.iter().map(|r| r.len()).max().unwrap_or(1);
-                        egui::Grid::new(ui.scope_id().with("md-table"))
-                            .striped(true)
-                            .num_columns(cols)
-                            .spacing([12.0, 6.0])
+                        let content_bg = ui.visuals().extreme_bg_color;
+                        let dark = (content_bg.r() as u16
+                            + content_bg.g() as u16
+                            + content_bg.b() as u16)
+                            < 382;
+                        let toward = if dark {
+                            Color32::WHITE
+                        } else {
+                            Color32::BLACK
+                        };
+                        let (base_t, alt_t) = if dark {
+                            (0.09, 0.15)
+                        } else {
+                            (0.07, 0.12)
+                        };
+                        let row_base = mix(content_bg, toward, base_t);
+                        let row_alt = mix(content_bg, toward, alt_t);
+                        let row_header = mix(row_base, accent, 0.12);
+                        let col_rule = muted.gamma_multiply(0.65);
+
+                        Frame::new()
+                            .stroke(Stroke::new(1.0_f32, muted.gamma_multiply(0.55)))
+                            .inner_margin(Margin::symmetric(4, 2))
                             .show(ui, |ui| {
-                                for (ri, row) in table_rows.iter().enumerate() {
-                                    for cell in row {
-                                        let rt = if ri == 0 {
-                                            RichText::new(cell)
-                                                .strong()
-                                                .size(font_size)
-                                                .color(accent)
+                                egui::Grid::new(ui.scope_id().with("md-table"))
+                                    .with_row_color(move |row, _| {
+                                        Some(if row == 0 {
+                                            row_header
+                                        } else if row % 2 == 0 {
+                                            row_base
                                         } else {
-                                            RichText::new(cell).size(font_size).color(text)
-                                        };
-                                        ui.label(rt);
-                                    }
-                                    ui.end_row();
-                                }
+                                            row_alt
+                                        })
+                                    })
+                                    .num_columns(cols)
+                                    .spacing([14.0, 8.0])
+                                    .show(ui, |ui| {
+                                        for (ri, row) in table_rows.iter().enumerate() {
+                                            for (ci, cell) in row.iter().enumerate() {
+                                                let rt = if ri == 0 {
+                                                    RichText::new(cell)
+                                                        .strong()
+                                                        .size(font_size)
+                                                        .color(accent)
+                                                } else {
+                                                    RichText::new(cell)
+                                                        .size(font_size)
+                                                        .color(text)
+                                                };
+                                                ui.horizontal(|ui| {
+                                                    if ci > 0 {
+                                                        let h = (font_size + 8.0).max(16.0);
+                                                        let (rect, _) = ui.allocate_exact_size(
+                                                            Vec2::new(1.0, h),
+                                                            Sense::hover(),
+                                                        );
+                                                        ui.painter().rect_filled(
+                                                            rect,
+                                                            0.0,
+                                                            col_rule,
+                                                        );
+                                                        ui.add_space(8.0);
+                                                    }
+                                                    ui.label(rt);
+                                                });
+                                            }
+                                            ui.end_row();
+                                        }
+                                    });
                             });
                         ui.add_space(8.0);
                     }
@@ -572,7 +726,7 @@ pub fn show_preview(
                     table_row.push(std::mem::take(&mut cell_buf));
                 }
                 Event::Rule => {
-                    flush_paragraph(ui, &mut paragraph_buf, &mut link, index, note_rel);
+                    flush_paragraph(ui, &mut paragraph_buf, &mut link, index, note_rel, &mut find_scrolled);
                     ui.add(egui::Separator::default().spacing(12.0));
                 }
                 Event::TaskListMarker(checked) => {
@@ -592,7 +746,7 @@ pub fn show_preview(
                 _ => {}
             }
         }
-        flush_paragraph(ui, &mut paragraph_buf, &mut link, index, note_rel);
+        flush_paragraph(ui, &mut paragraph_buf, &mut link, index, note_rel, &mut find_scrolled);
     });
 
     let _ = (
@@ -605,6 +759,7 @@ pub fn show_preview(
     PreviewOutcome {
         link,
         heading_rects,
+        find_scrolled,
     }
 }
 

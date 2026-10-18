@@ -268,7 +268,7 @@ impl GraphState {
             };
             let screen = map(p, rect.center(), self.pan, self.zoom);
             let deg = *self.cache.degrees.get(&id).unwrap_or(&0) as f32;
-            let r = ((5.5 + deg.sqrt() * 4.2) * self.zoom).clamp(4.0, 28.0);
+            let r = ((5.5 + deg.sqrt() * 4.2) * self.zoom).clamp(4.0, 22.0);
 
             // Sub-pixel nodes when zoomed way out: skip unless hub / active.
             let is_center = center == Some(id);
