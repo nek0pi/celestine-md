@@ -77,20 +77,42 @@ impl VaultIndex {
     }
 
     pub fn upsert_file(&mut self, vault_root: &Path, path: &Path) -> Result<NoteId, CoreError> {
+        self.upsert_file_impl(vault_root, path).map(|(id, _)| id)
+    }
+
+    pub(crate) fn upsert_file_if_changed(
+        &mut self,
+        vault_root: &Path,
+        path: &Path,
+    ) -> Result<bool, CoreError> {
+        self.upsert_file_impl(vault_root, path)
+            .map(|(_, changed)| changed)
+    }
+
+    fn upsert_file_impl(
+        &mut self,
+        vault_root: &Path,
+        path: &Path,
+    ) -> Result<(NoteId, bool), CoreError> {
         let resolved = resolve_vault_abs(vault_root, path)?;
         let (path, rel) = canonical_note_target(resolved)?;
         if !rel.to_lowercase().ends_with(".md") {
             return Err(CoreError::NoteNotFound(rel));
         }
-        // Skip config dirs
-        if rel.starts_with(".obsidian/")
-            || rel.starts_with(".celestine/")
-            || rel.starts_with(".trash/")
-        {
+        if !is_visible_path(vault_root, &path) {
             return Err(CoreError::NoteNotFound(rel));
         }
 
         let content = std::fs::read_to_string(&path)?;
+        let rel_key = normalize_rel(&rel);
+        if let Some(&existing) = self.by_rel.get(&rel_key) {
+            if let Some(meta) = self.notes.get(&existing) {
+                if meta.path.as_path() == path.as_path() && meta.content == content {
+                    return Ok((existing, false));
+                }
+            }
+        }
+
         let parsed = extract_note_data(&content);
         let stem = path
             .file_stem()
@@ -102,7 +124,6 @@ impl VaultIndex {
             .clone()
             .unwrap_or_else(|| stem.clone());
 
-        let rel_key = normalize_rel(&rel);
         let id = if let Some(&existing) = self.by_rel.get(&rel_key) {
             self.remove_lookups(existing);
             existing
@@ -138,13 +159,10 @@ impl VaultIndex {
         let stem_key = stem.to_lowercase();
         self.by_stem.entry(stem_key).or_default().push(id);
         for a in &meta.aliases {
-            self.by_alias
-                .entry(a.to_lowercase())
-                .or_default()
-                .push(id);
+            self.by_alias.entry(a.to_lowercase()).or_default().push(id);
         }
         self.notes.insert(id, meta);
-        Ok(id)
+        Ok((id, true))
     }
 
     pub fn remove_path(&mut self, vault_root: &Path, path: &Path) {
@@ -182,6 +200,15 @@ impl VaultIndex {
     pub fn aliases(&self) -> &HashMap<String, Vec<NoteId>> {
         &self.by_alias
     }
+}
+
+pub(crate) fn is_visible_path(vault_root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(vault_root) else {
+        return false;
+    };
+    !relative
+        .components()
+        .any(|component| component.as_os_str().to_string_lossy().starts_with('.'))
 }
 
 pub fn normalize_rel(rel: &str) -> String {
@@ -225,5 +252,65 @@ fn from_hex(b: u8) -> Option<u8> {
         b'a'..=b'f' => Some(b - b'a' + 10),
         b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_visible_path, VaultIndex};
+    use std::fs;
+
+    #[test]
+    fn upsert_if_changed_skips_unchanged_content_and_updates_edits() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("note.md");
+        fs::write(&path, "# Original\n").unwrap();
+
+        let mut index = VaultIndex::new();
+        assert!(index.upsert_file_if_changed(root.path(), &path).unwrap());
+        let id = index.get_by_rel("note.md").unwrap().id;
+        let content_ptr = index.get(id).unwrap().content.as_ptr();
+
+        assert!(!index.upsert_file_if_changed(root.path(), &path).unwrap());
+        assert_eq!(index.get_by_rel("note.md").unwrap().id, id);
+        assert_eq!(index.get(id).unwrap().content.as_ptr(), content_ptr);
+
+        fs::write(&path, "# Edited\n").unwrap();
+        assert!(index.upsert_file_if_changed(root.path(), &path).unwrap());
+        let note = index.get_by_rel("note.md").unwrap();
+        assert_eq!(note.id, id);
+        assert_eq!(note.title, "note");
+        assert_eq!(note.headings[0].text, "Edited");
+    }
+
+    #[test]
+    fn case_only_path_change_reuses_id_and_refreshes_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let old_path = root.path().join("note.md");
+        let new_path = root.path().join("Note.md");
+        fs::write(&old_path, "---\ntitle: Old\n---\n").unwrap();
+
+        let mut index = VaultIndex::new();
+        let id = index.upsert_file(root.path(), &old_path).unwrap();
+        fs::rename(&old_path, &new_path).unwrap();
+        fs::write(&new_path, "---\ntitle: New\n---\n").unwrap();
+
+        assert!(index
+            .upsert_file_if_changed(root.path(), &new_path)
+            .unwrap());
+        let note = index.get_by_rel("note.md").unwrap();
+        assert_eq!(note.id, id);
+        assert_eq!(note.path, new_path);
+        assert_eq!(note.title, "New");
+    }
+
+    #[test]
+    fn visibility_rejects_dot_components_and_accepts_hidden_root() {
+        let root = std::path::Path::new("/vault/.hidden/root");
+        assert!(is_visible_path(root, root));
+        assert!(is_visible_path(root, &root.join("notes/note.md")));
+        assert!(!is_visible_path(root, &root.join(".private/note.md")));
+        assert!(!is_visible_path(root, &root.join("notes/.draft/note.md")));
+        assert!(!is_visible_path(root, &root.join("../outside.md")));
     }
 }

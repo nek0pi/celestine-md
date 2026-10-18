@@ -171,9 +171,14 @@ impl CelestineApp {
     }
 
     fn open_vault(&mut self, path: PathBuf, ctx: &egui::Context) {
-        match Vault::open(&path) {
+        let wake_ctx = ctx.clone();
+        match Vault::open_with_wakeup(&path, move || wake_ctx.request_repaint()) {
             Ok(v) => {
-                self.status = format!("vault {}", path.display());
+                self.status = if let Some(error) = v.watcher_error() {
+                    format!("vault {} · filesystem polling (watcher: {error})", path.display())
+                } else {
+                    format!("vault {}", path.display())
+                };
                 self.image_resolver.clear();
                 self.image_rels = None;
                 self.tabs.clear();
@@ -1016,27 +1021,25 @@ fn chrono_lite_stamp() -> String {
 }
 
 impl eframe::App for CelestineApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
-        let dt = self.last_frame.elapsed().as_secs_f32();
-        self.last_frame = Instant::now();
-        // Overlay fade-in
-        if self.overlay != Overlay::None {
-            self.overlay_anim = (self.overlay_anim + dt * 8.0).min(1.0);
-        } else {
-            self.overlay_anim = 0.0;
-        }
-
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Consume background work even when eframe suppresses hidden-window UI.
         if let Some(vault) = self.vault.as_mut() {
-            if vault.poll_fs() {
-                self.image_resolver.clear();
-                self.image_rels = None;
-                self.status = "index refreshed".into();
+            let was_degraded = vault.watcher_error().is_some();
+            let changed = vault.poll_fs();
+            if changed || (!was_degraded && vault.watcher_error().is_some()) {
+                if changed {
+                    self.image_resolver.clear();
+                    self.image_rels = None;
+                }
+                self.status = if let Some(error) = vault.watcher_error() {
+                    format!("index refreshed · filesystem polling (watcher: {error})")
+                } else {
+                    "index refreshed".into()
+                };
             }
-        }
-
-        if let Some(cmd) = self.keymap.consume(&ctx, self.editor_focused) {
-            self.handle_command(cmd, &ctx);
+            if let Some(delay) = vault.next_fs_poll() {
+                ctx.request_repaint_after(delay);
+            }
         }
 
         if self.update_checker.poll() {
@@ -1050,6 +1053,22 @@ impl eframe::App for CelestineApp {
             if self.persist.dismissed_update_line.as_deref() == Some(line.as_str()) {
                 self.update_checker.clear();
             }
+        }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        let dt = self.last_frame.elapsed().as_secs_f32();
+        self.last_frame = Instant::now();
+        // Overlay fade-in
+        if self.overlay != Overlay::None {
+            self.overlay_anim = (self.overlay_anim + dt * 8.0).min(1.0);
+        } else {
+            self.overlay_anim = 0.0;
+        }
+
+        if let Some(cmd) = self.keymap.consume(&ctx, self.editor_focused) {
+            self.handle_command(cmd, &ctx);
         }
 
         let palette = theme_apply::ThemePalette::from_tokens(&self.theme);
@@ -1896,7 +1915,9 @@ impl eframe::App for CelestineApp {
         });
 
         self.draw_overlay(&ctx, accent, muted);
-        ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        if self.overlay != Overlay::None && self.overlay_anim < 1.0 {
+            ctx.request_repaint();
+        }
     }
 }
 
