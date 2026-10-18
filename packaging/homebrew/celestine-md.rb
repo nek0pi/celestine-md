@@ -15,18 +15,18 @@ class CelestineMd < Formula
   on_macos do
     on_arm do
       url "https://github.com/nek0pi/celestine-md/releases/download/v0.3.1/celestine-macos-aarch64-v0.3.1.tar.gz"
-      sha256 "3191ec43051b0fd9b1a060a84d1b7bdf73937466647648619912d2375918bec1"
+      sha256 "03708abb98581a0014787c85634a7db15101e143df07985c6dd7b3512b156e9b"
     end
     on_intel do
       url "https://github.com/nek0pi/celestine-md/releases/download/v0.3.1/celestine-macos-x86_64-v0.3.1.tar.gz"
-      sha256 "296401c43db5bf7cd227f0c7f6d82cb67ed69688b9aa14116ca1cb26904a7d6c"
+      sha256 "2b5e641404553a93a9670cc858206d18e953837766d0f5801b2cc688be880f15"
     end
   end
 
   on_linux do
     on_intel do
       url "https://github.com/nek0pi/celestine-md/releases/download/v0.3.1/celestine-linux-x86_64-v0.3.1.tar.gz"
-      sha256 "e7f6ee54dda6f6b42e73cd15baab2102cbe9e93bab0406a6a9fff91b50292026"
+      sha256 "5f35582d7bb492a002ce3991cf401e98e690381bdd1f655553b10dc60812e004"
     end
   end
 

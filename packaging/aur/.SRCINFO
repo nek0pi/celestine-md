@@ -13,6 +13,6 @@ pkgbase = celestine-md
 	depends = gtk3
 	options = !lto
 	source = celestine-md-0.3.1.tar.gz::https://github.com/nek0pi/celestine-md/archive/refs/tags/v0.3.1.tar.gz
-	sha256sums = 5f52d467064b1e3df60e1eb0b8c23a772b212ba9df41468e4fa075327ce92a2c
+	sha256sums = deaa7b046dff539de52c148b7be3dc9db578ab209c799c277ae889cb9d2af2c3
 
 pkgname = celestine-md
