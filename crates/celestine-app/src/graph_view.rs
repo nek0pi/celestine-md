@@ -545,8 +545,10 @@ fn settle_clustered(
         for j in (i + 1)..visible.len() {
             let a = visible[i];
             let b = visible[j];
-            let pa = positions[&a];
-            let pb = positions[&b];
+            // A node added mid-settle (rename, new note) has no position yet.
+            let (Some(&pa), Some(&pb)) = (positions.get(&a), positions.get(&b)) else {
+                continue;
+            };
             let mut d = pa - pb;
             let dist = d.length().max(10.0);
             d /= dist;
@@ -619,6 +621,42 @@ fn settle_clustered(
             *p += step;
             p.x = p.x.clamp(view.left() + pad, view.right() - pad);
             p.y = p.y.clamp(view.top() + pad, view.bottom() - pad);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vault_with(rels: &[&str]) -> (tempfile::TempDir, Vault) {
+        let dir = tempfile::tempdir().unwrap();
+        for rel in rels {
+            let path = dir.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, format!("# {rel}\n[[{}]]\n", rels[0])).unwrap();
+        }
+        let vault = Vault::open(dir.path()).unwrap();
+        (dir, vault)
+    }
+
+    #[test]
+    fn settle_skips_nodes_without_a_position() {
+        let (_dir, vault) = vault_with(&["Home.md", "a/One.md", "a/Two.md"]);
+        let visible = vault.graph.node_ids();
+        let view = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let mut positions = HashMap::new();
+        let mut centers = HashMap::new();
+        seed_cluster_layout(&mut positions, &mut centers, &vault, &visible, view);
+        // A note renamed/created during the settle window has no position yet.
+        let missing = visible[1];
+        positions.remove(&missing);
+
+        settle_clustered(&mut positions, &mut centers, &vault, &visible, view, 0.02);
+
+        assert!(!positions.contains_key(&missing), "settle must not invent positions");
+        for (id, p) in &positions {
+            assert!(p.x.is_finite() && p.y.is_finite(), "{id:?} drifted to {p:?}");
         }
     }
 }

@@ -263,24 +263,25 @@ impl Keymap {
         Ok(())
     }
 
-    pub fn consume(&self, ctx: &egui::Context, editor_focused: bool) -> Option<Command> {
+    /// Consume a bound chord from this frame's input.
+    ///
+    /// Keys that a text field needs (Delete, `?`) are left alone whenever an
+    /// egui widget owns keyboard focus — the note editor, the tree's inline
+    /// rename box, an overlay filter — regardless of which pane the app thinks
+    /// is active.
+    pub fn consume(&self, ctx: &egui::Context) -> Option<Command> {
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
             return Some(Command::Escape);
         }
+
+        let text_input_active = ctx.memory(|m| m.focused().is_some());
 
         let pairs: Vec<(Command, KeyboardShortcut)> =
             self.shortcuts.iter().map(|(c, s)| (*c, *s)).collect();
 
         for (cmd, sc) in pairs {
-            if cmd == Command::Shortcuts && editor_focused {
-                let slash = KeyboardShortcut::new(Modifiers::COMMAND, Key::Slash);
-                if ctx.input_mut(|i| i.consume_shortcut(&slash)) {
-                    return Some(Command::Shortcuts);
-                }
-                continue;
-            }
-            // Don't steal Delete from the text editor.
-            if cmd == Command::DeleteItem && editor_focused {
+            // Don't steal Delete from a text field.
+            if cmd == Command::DeleteItem && text_input_active {
                 continue;
             }
             if ctx.input_mut(|i| i.consume_shortcut(&sc)) {
@@ -294,12 +295,17 @@ impl Keymap {
             return Some(Command::FontBigger);
         }
 
-        if !editor_focused
+        // `?` opens the cheat sheet unless someone is typing; Mod+/ always works.
+        let slash = KeyboardShortcut::new(Modifiers::COMMAND, Key::Slash);
+        if ctx.input_mut(|i| i.consume_shortcut(&slash)) {
+            return Some(Command::Shortcuts);
+        }
+        if !text_input_active
             && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Questionmark))
         {
             return Some(Command::Shortcuts);
         }
-        if !editor_focused
+        if !text_input_active
             && ctx.input(|i| i.modifiers.shift)
             && ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::Slash))
         {
@@ -466,5 +472,87 @@ fn bundled_profile_path(profile: &str) -> Option<PathBuf> {
 pub fn ensure_user_config() {
     if let Some(dirs) = directories::ProjectDirs::from("md", "Celestine", "celestine") {
         let _ = std::fs::create_dir_all(dirs.config_dir());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{Event, RawInput};
+
+    fn key_press(key: Key, modifiers: Modifiers) -> RawInput {
+        let mut input = RawInput::default();
+        input.events.push(Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        });
+        input
+    }
+
+    /// Run one headless frame.
+    fn frame(ctx: &egui::Context, input: RawInput, f: impl FnMut(&mut egui::Ui)) {
+        let mut out = ctx.run_ui(input, f);
+        out.textures_delta.clear();
+    }
+
+    /// One frame that draws a text field and gives it keyboard focus — the
+    /// tree's inline rename box or an overlay filter, as far as egui knows.
+    fn focus_a_text_field(ctx: &egui::Context, text: &mut String) {
+        frame(ctx, RawInput::default(), |ui| {
+            ui.text_edit_singleline(text).request_focus();
+        });
+    }
+
+    #[test]
+    fn delete_is_left_to_a_focused_text_field() {
+        let keymap = Keymap::obsidian_defaults();
+        let ctx = egui::Context::default();
+        let mut text = String::from("draft");
+        focus_a_text_field(&ctx, &mut text);
+        frame(&ctx, key_press(Key::Delete, Modifiers::NONE), |ui| {
+            // The app calls consume() before any widget is drawn.
+            let cmd = keymap.consume(ui.ctx());
+            assert_ne!(cmd, Some(Command::DeleteItem), "Delete must edit the text, not delete a file");
+            ui.text_edit_singleline(&mut text);
+        });
+    }
+
+    #[test]
+    fn question_mark_is_left_to_a_focused_text_field() {
+        let keymap = Keymap::obsidian_defaults();
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        focus_a_text_field(&ctx, &mut text);
+        frame(&ctx, key_press(Key::Questionmark, Modifiers::NONE), |ui| {
+            assert_ne!(keymap.consume(ui.ctx()), Some(Command::Shortcuts));
+        });
+    }
+
+    #[test]
+    fn delete_runs_the_command_when_no_text_field_has_focus() {
+        let keymap = Keymap::obsidian_defaults();
+        let ctx = egui::Context::default();
+        frame(&ctx, RawInput::default(), |_| {});
+        frame(&ctx, key_press(Key::Delete, Modifiers::NONE), |ui| {
+            assert_eq!(keymap.consume(ui.ctx()), Some(Command::DeleteItem));
+        });
+    }
+
+    #[test]
+    fn delete_runs_the_command_after_text_field_lost_focus() {
+        let keymap = Keymap::obsidian_defaults();
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        focus_a_text_field(&ctx, &mut text);
+        // Frame where the field is drawn but surrenders focus (rename committed).
+        frame(&ctx, RawInput::default(), |ui| {
+            ui.text_edit_singleline(&mut text).surrender_focus();
+        });
+        frame(&ctx, key_press(Key::Delete, Modifiers::NONE), |ui| {
+            assert_eq!(keymap.consume(ui.ctx()), Some(Command::DeleteItem));
+        });
     }
 }

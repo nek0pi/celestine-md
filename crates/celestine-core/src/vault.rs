@@ -522,7 +522,9 @@ impl Vault {
                 format!("missing {old_rel}"),
             )));
         }
-        if new_path.exists() {
+        // On case-insensitive filesystems `Note.md` "exists" when `note.md`
+        // does; a rename that only changes case is still allowed.
+        if new_path.exists() && !same_entry(&old_path, &new_path) {
             return Err(CoreError::Io(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
                 format!("{new_rel} already exists"),
@@ -656,6 +658,15 @@ fn fs_entry(path: &Path) -> std::io::Result<Option<FsEntry>> {
         return Ok(Some(FsEntry::Image(stamp)));
     }
     Ok(None)
+}
+
+/// Do both paths name the same on-disk entry (e.g. differ only by case)?
+fn same_entry(a: &Path, b: &Path) -> bool {
+    same_file::is_same_file(a, b).unwrap_or(false)
+        || matches!(
+            (a.canonicalize(), b.canonicalize()),
+            (Ok(a), Ok(b)) if a == b
+        )
 }
 
 #[cfg(test)]
@@ -1334,5 +1345,49 @@ mod tests {
             vault.note_reads
         );
         assert_eq!((vault.full_scans, vault.note_reads), (0, 0));
+    }
+
+    fn write_rel(root: &Path, rel: &str, content: &str) {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn rename_note_differing_only_by_case() {
+        let dir = tempfile::tempdir().unwrap();
+        write_rel(dir.path(), "note.md", "# note\n");
+        let mut v = Vault::open(dir.path()).unwrap();
+        v.rename_entry("note.md", "Note.md")
+            .expect("case-only rename must succeed");
+        assert_eq!(v.list_md_rel_paths(), vec!["Note.md"]);
+        let on_disk: Vec<String> = std::fs::read_dir(v.root())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(on_disk.contains(&"Note.md".to_string()), "{on_disk:?}");
+        assert!(!on_disk.contains(&"note.md".to_string()), "{on_disk:?}");
+    }
+
+    #[test]
+    fn rename_onto_a_different_existing_note_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        write_rel(dir.path(), "a.md", "# a\n");
+        write_rel(dir.path(), "b.md", "# b\n");
+        let mut v = Vault::open(dir.path()).unwrap();
+        assert!(v.rename_entry("a.md", "b.md").is_err());
+        assert_eq!(v.list_md_rel_paths(), vec!["a.md", "b.md"]);
+    }
+
+    #[test]
+    fn uppercase_md_extension_is_indexed() {
+        let dir = tempfile::tempdir().unwrap();
+        write_rel(dir.path(), "Home.md", "# Home\n");
+        let mut v = Vault::open(dir.path()).unwrap();
+        let root = v.root().to_path_buf();
+        let path = root.join("Caps.MD");
+        write_rel(&root, "Caps.MD", "# Caps\n");
+        v.index.upsert_file(&root, &path).unwrap();
+        assert!(v.index.get_by_rel("Caps.MD").is_some());
     }
 }

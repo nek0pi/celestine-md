@@ -105,6 +105,17 @@ impl UpdateChecker {
         }
     }
 
+    /// A checker that never fetches anything (tests).
+    #[cfg(test)]
+    pub fn idle() -> Self {
+        let (_tx, rx) = mpsc::channel();
+        Self {
+            rx,
+            available: None,
+            settled: true,
+        }
+    }
+
     pub fn pending(&self) -> bool {
         !self.settled
     }

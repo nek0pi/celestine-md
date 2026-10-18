@@ -123,12 +123,35 @@ impl CelestineApp {
         crate::fonts::install(&cc.egui_ctx);
         theme_apply::apply_theme(&cc.egui_ctx, &theme, persist.ui_font_scale);
 
-        let mut app = Self {
+        let mut app = Self::with_parts(
+            Keymap::detect_and_load(),
+            theme,
+            theme_name,
+            persist,
+            UpdateChecker::start(env!("CARGO_PKG_VERSION")),
+        );
+
+        if let Some(path) = std::env::args().nth(1) {
+            app.open_vault(PathBuf::from(path), &cc.egui_ctx);
+        } else if let Some(path) = app.persist.vault_to_restore() {
+            app.open_vault(path, &cc.egui_ctx);
+        }
+        app
+    }
+
+    fn with_parts(
+        keymap: Keymap,
+        theme: ThemeTokens,
+        theme_name: String,
+        persist: AppState,
+        update_checker: UpdateChecker,
+    ) -> Self {
+        Self {
             vault: None,
             tabs: Vec::new(),
             active_tab: 0,
             former_tab: 0,
-            keymap: Keymap::detect_and_load(),
+            keymap,
             theme,
             theme_name,
             overlay: Overlay::None,
@@ -156,18 +179,11 @@ impl CelestineApp {
             overlay_focus_pending: false,
             folder_icons: HashMap::new(),
             recent_notes: Vec::new(),
-            update_checker: UpdateChecker::start(env!("CARGO_PKG_VERSION")),
+            update_checker,
             update_banner_hidden: false,
             image_resolver: crate::media::ImageResolver::default(),
             image_rels: None,
-        };
-
-        if let Some(path) = std::env::args().nth(1) {
-            app.open_vault(PathBuf::from(path), &cc.egui_ctx);
-        } else if let Some(path) = app.persist.vault_to_restore() {
-            app.open_vault(path, &cc.egui_ctx);
         }
-        app
     }
 
     fn open_vault(&mut self, path: PathBuf, ctx: &egui::Context) {
@@ -431,15 +447,56 @@ impl CelestineApp {
     }
 
     fn close_active_tab(&mut self) {
-        if self.tabs.is_empty() {
+        self.close_tab(self.active_tab);
+    }
+
+    /// Close tab `i`, keeping `active_tab` / `former_tab` on the same notes.
+    fn close_tab(&mut self, i: usize) {
+        if i >= self.tabs.len() {
             return;
         }
-        self.tabs.remove(self.active_tab);
-        if self.active_tab >= self.tabs.len() && !self.tabs.is_empty() {
-            self.active_tab = self.tabs.len() - 1;
-        }
-        if self.tabs.is_empty() {
-            self.active_tab = 0;
+        self.tabs.remove(i);
+        let len = self.tabs.len();
+        let shift = |t: usize| -> usize {
+            if len == 0 {
+                0
+            } else if t > i {
+                t - 1
+            } else {
+                t.min(len - 1)
+            }
+        };
+        self.active_tab = shift(self.active_tab);
+        self.former_tab = shift(self.former_tab);
+    }
+
+    /// Act on a link clicked in the preview.
+    fn follow_link(&mut self, link: preview::LinkTarget, ctx: &egui::Context) {
+        use preview::LinkTarget;
+        match link {
+            LinkTarget::Image(rel) => self.open_path(&rel, true),
+            LinkTarget::Note { rel, heading } => {
+                let exists = self
+                    .vault
+                    .as_ref()
+                    .and_then(|v| v.index.get_by_rel(&rel))
+                    .is_some();
+                if !exists {
+                    self.status = format!("creating {rel}");
+                }
+                self.open_note(&rel, true);
+                if let Some(h) = heading {
+                    if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                        tab.scroll_to_heading = Some(h);
+                    }
+                }
+            }
+            LinkTarget::Heading(h) => {
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    tab.scroll_to_heading = Some(h);
+                }
+            }
+            LinkTarget::External(url) => ctx.open_url(egui::OpenUrl::new_tab(url)),
         }
     }
 
@@ -822,6 +879,10 @@ impl CelestineApp {
         let old_rel = match &edit.item {
             file_tree::TreeNavItem::Dir(p) | file_tree::TreeNavItem::File(p) => p.clone(),
         };
+        let new_name = match &edit.item {
+            file_tree::TreeNavItem::File(_) => keep_file_extension(&old_rel, new_name),
+            file_tree::TreeNavItem::Dir(_) => new_name,
+        };
         let parent = Path::new(&old_rel)
             .parent()
             .map(|p| p.to_string_lossy().replace('\\', "/"))
@@ -966,6 +1027,8 @@ impl CelestineApp {
                 if self.active_tab >= self.tabs.len() {
                     self.active_tab = self.tabs.len().saturating_sub(1);
                 }
+                self.former_tab = self.former_tab.min(self.tabs.len().saturating_sub(1));
+                self.forget_history(&rel);
                 self.tree_expanded.remove(&rel);
                 self.folder_icons.remove(&rel);
                 self.persist_folder_icons();
@@ -973,6 +1036,21 @@ impl CelestineApp {
                 self.status = format!("deleted {rel}");
             }
             Err(e) => self.status = format!("delete failed: {e}"),
+        }
+    }
+
+    /// Drop a deleted note/folder from navigation history and recents, so
+    /// Back/Forward never re-opens (and thereby recreates) it.
+    fn forget_history(&mut self, rel: &str) {
+        let prefix = format!("{rel}/");
+        let gone = |p: &String| p == rel || p.starts_with(&prefix);
+        for list in [&mut self.nav_back, &mut self.nav_forward] {
+            list.retain(|p| !gone(p));
+            list.dedup();
+        }
+        self.recent_notes.retain(|p| !gone(p));
+        if let Some(vault) = &self.vault {
+            save_recent_notes(vault, &self.recent_notes);
         }
     }
 
@@ -1008,6 +1086,26 @@ impl CelestineApp {
         self.focus = FocusPane::Files;
         self.editor_focused = false;
         self.status = "revealed in files".into();
+    }
+}
+
+/// A tree rename that drops the extension would turn `Note.md` into `Note`,
+/// which the index no longer sees. Notes always stay `.md`; other files keep
+/// their old extension when the draft has none.
+fn keep_file_extension(old_rel: &str, draft: String) -> String {
+    let Some(old_ext) = Path::new(old_rel).extension().and_then(|e| e.to_str()) else {
+        return draft;
+    };
+    if old_ext.eq_ignore_ascii_case("md") {
+        if draft.to_lowercase().ends_with(".md") {
+            draft
+        } else {
+            format!("{draft}.md")
+        }
+    } else if Path::new(&draft).extension().is_some() {
+        draft
+    } else {
+        format!("{draft}.{old_ext}")
     }
 }
 
@@ -1067,7 +1165,7 @@ impl eframe::App for CelestineApp {
             self.overlay_anim = 0.0;
         }
 
-        if let Some(cmd) = self.keymap.consume(&ctx, self.editor_focused) {
+        if let Some(cmd) = self.keymap.consume(&ctx) {
             self.handle_command(cmd, &ctx);
         }
 
@@ -1265,10 +1363,7 @@ impl eframe::App for CelestineApp {
                             self.active_tab = i;
                         }
                         if let Some(i) = close_i {
-                            self.tabs.remove(i);
-                            if self.active_tab >= self.tabs.len() && !self.tabs.is_empty() {
-                                self.active_tab = self.tabs.len() - 1;
-                            }
+                            self.close_tab(i);
                         }
                     });
                 });
@@ -1738,7 +1833,7 @@ impl eframe::App for CelestineApp {
                             .inner
                     } else {
                         preview::PreviewOutcome {
-                            open_rel: None,
+                            link: None,
                             heading_rects: vec![],
                         }
                     };
@@ -1748,20 +1843,8 @@ impl eframe::App for CelestineApp {
                             tab.scroll_to_line = None;
                         }
                     }
-                    if let Some(r) = outcome.open_rel {
-                        if crate::media::is_image_rel(&r) {
-                            self.open_path(&r, true);
-                        } else {
-                            if self
-                                .vault
-                                .as_ref()
-                                .and_then(|v| v.index.get_by_rel(&r))
-                                .is_none()
-                            {
-                                self.status = format!("creating {r}");
-                            }
-                            self.open_note(&r, true);
-                        }
+                    if let Some(link) = outcome.link {
+                        self.follow_link(link, &ctx);
                     }
                 } else {
                     let font = FontId::monospace(md_font);
@@ -2660,17 +2743,23 @@ fn char_offset_at_line(text: &str, line: usize) -> usize {
 
 fn char_offset_for_heading(text: &str, heading: &str) -> Option<usize> {
     let heading = heading.trim();
-    for (i, line) in text.lines().enumerate() {
+    let candidates = text.lines().enumerate().filter_map(|(i, line)| {
         let trimmed = line.trim_start();
-        if !trimmed.starts_with('#') {
-            continue;
-        }
-        let after_hashes = trimmed.trim_start_matches('#').trim_start();
+        trimmed
+            .starts_with('#')
+            .then(|| (i, trimmed.trim_start_matches('#').trim_start()))
+    });
+    // Exact text first, so `# A B` and `# A-B` stay distinct; slug anchors after.
+    let mut slug_hit = None;
+    for (i, after_hashes) in candidates {
         if after_hashes == heading {
             return Some(char_offset_at_line(text, i));
         }
+        if slug_hit.is_none() && preview::heading_matches(after_hashes, heading) {
+            slug_hit = Some(i);
+        }
     }
-    None
+    slug_hit.map(|i| char_offset_at_line(text, i))
 }
 
 struct TextStats {
@@ -2805,6 +2894,7 @@ fn cmd_from_id(id: &str) -> Option<Command> {
     })
 }
 
+
 #[cfg(test)]
 mod note_open_boundary_tests {
     use super::*;
@@ -2896,5 +2986,181 @@ mod note_open_boundary_tests {
         assert_eq!(app.tabs[0].rel, "real/note.md");
         assert!(app.tabs[0].buffer.ends_with("unsaved edit"));
         assert!(app.tabs[0].dirty);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An app over a throwaway vault; nothing touches the user's config dir.
+    fn app_with_notes(rels: &[&str]) -> (tempfile::TempDir, CelestineApp) {
+        let dir = tempfile::tempdir().unwrap();
+        for rel in rels {
+            let path = dir.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, format!("# {rel}\n\n## Section\n")).unwrap();
+        }
+        let mut app = CelestineApp::with_parts(
+            Keymap::obsidian_defaults(),
+            ThemeTokens::default(),
+            "test".into(),
+            AppState::default(),
+            UpdateChecker::idle(),
+        );
+        app.vault = Some(Vault::open(dir.path()).unwrap());
+        (dir, app)
+    }
+
+    fn active_rel(app: &CelestineApp) -> &str {
+        &app.tabs[app.active_tab].rel
+    }
+
+    fn vault_rels(app: &CelestineApp) -> Vec<String> {
+        app.vault.as_ref().unwrap().list_md_rel_paths()
+    }
+
+    #[test]
+    fn tree_rename_without_extension_keeps_md() {
+        let (_d, mut app) = app_with_notes(&["Note.md"]);
+        app.open_note("Note.md", false);
+        app.start_tree_rename(file_tree::TreeNavItem::File("Note.md".into()));
+        app.commit_tree_rename("Renamed".into());
+        assert_eq!(vault_rels(&app), vec!["Renamed.md"], "{}", app.status);
+        assert_eq!(active_rel(&app), "Renamed.md");
+    }
+
+    #[test]
+    fn tree_rename_of_image_keeps_its_extension() {
+        let (d, mut app) = app_with_notes(&["Note.md"]);
+        std::fs::write(d.path().join("pic.png"), b"x").unwrap();
+        app.start_tree_rename(file_tree::TreeNavItem::File("pic.png".into()));
+        app.commit_tree_rename("photo".into());
+        let root = &app.vault.as_ref().unwrap().root();
+        assert!(root.join("photo.png").is_file(), "{}", app.status);
+    }
+
+    #[test]
+    fn tree_rename_with_extension_is_used_as_typed() {
+        let (_d, mut app) = app_with_notes(&["Note.md"]);
+        app.start_tree_rename(file_tree::TreeNavItem::File("Note.md".into()));
+        app.commit_tree_rename("Other.md".into());
+        assert_eq!(vault_rels(&app), vec!["Other.md"]);
+    }
+
+    #[test]
+    fn closing_a_tab_left_of_the_active_one_keeps_the_active_note() {
+        let (_d, mut app) = app_with_notes(&["A.md", "B.md", "C.md"]);
+        app.open_note("A.md", false);
+        app.open_note("B.md", true);
+        app.open_note("C.md", true);
+        assert_eq!(active_rel(&app), "C.md");
+        assert_eq!(app.former_tab, 1);
+        app.close_tab(0);
+        assert_eq!(active_rel(&app), "C.md");
+        assert_eq!(app.tabs[app.former_tab].rel, "B.md");
+    }
+
+    #[test]
+    fn closing_the_active_tab_moves_to_a_neighbour() {
+        let (_d, mut app) = app_with_notes(&["A.md", "B.md", "C.md"]);
+        app.open_note("A.md", false);
+        app.open_note("B.md", true);
+        app.open_note("C.md", true);
+        app.close_tab(2);
+        assert_eq!(active_rel(&app), "B.md");
+        app.close_tab(0);
+        assert_eq!(active_rel(&app), "B.md");
+        app.close_tab(0);
+        assert!(app.tabs.is_empty());
+        assert_eq!(app.active_tab, 0);
+    }
+
+    #[test]
+    fn back_after_delete_does_not_resurrect_the_note() {
+        let (_d, mut app) = app_with_notes(&["A.md", "B.md", "C.md"]);
+        app.open_note("A.md", false);
+        app.open_note("B.md", true);
+        app.open_note("C.md", true);
+        assert_eq!(app.nav_back, vec!["A.md", "B.md"]);
+
+        app.focus = FocusPane::Files;
+        app.tree_cursor = Some(file_tree::TreeNavItem::File("B.md".into()));
+        app.delete_tree_selection();
+        assert_eq!(vault_rels(&app), vec!["A.md", "C.md"], "{}", app.status);
+        assert!(!app.nav_back.iter().any(|r| r == "B.md"), "{:?}", app.nav_back);
+
+        app.nav_go_back();
+        assert_eq!(active_rel(&app), "A.md");
+        assert_eq!(vault_rels(&app), vec!["A.md", "C.md"], "Back must not recreate B.md");
+        let root = &app.vault.as_ref().unwrap().root();
+        assert!(!root.join("B.md").exists());
+    }
+
+    #[test]
+    fn forward_history_is_purged_on_delete_too() {
+        let (_d, mut app) = app_with_notes(&["A.md", "B.md"]);
+        app.open_note("A.md", false);
+        app.open_note("B.md", true);
+        app.nav_go_back();
+        assert_eq!(app.nav_forward, vec!["B.md"]);
+        app.focus = FocusPane::Files;
+        app.tree_cursor = Some(file_tree::TreeNavItem::File("B.md".into()));
+        app.delete_tree_selection();
+        assert!(app.nav_forward.is_empty(), "{:?}", app.nav_forward);
+        assert!(!app.recent_notes.iter().any(|r| r == "B.md"));
+    }
+
+    #[test]
+    fn editor_heading_jump_prefers_exact_match_over_slug_twin() {
+        let text = "# A B\n\ntext\n\n# A-B\n";
+        let second = text.find("# A-B").unwrap();
+        assert_eq!(char_offset_for_heading(text, "A-B"), Some(second));
+        assert_eq!(char_offset_for_heading(text, "A B"), Some(0));
+        // Slug anchors still resolve when nothing matches exactly.
+        assert_eq!(char_offset_for_heading(text, "a-b"), Some(0));
+    }
+
+    #[test]
+    fn heading_link_scrolls_the_current_note_instead_of_creating_dot_md() {
+        let (_d, mut app) = app_with_notes(&["Home.md"]);
+        app.open_note("Home.md", false);
+        let ctx = egui::Context::default();
+        app.follow_link(preview::LinkTarget::Heading("Section".into()), &ctx);
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.tabs[0].scroll_to_heading.as_deref(), Some("Section"));
+        assert_eq!(vault_rels(&app), vec!["Home.md"]);
+    }
+
+    #[test]
+    fn note_link_with_heading_opens_and_scrolls() {
+        let (_d, mut app) = app_with_notes(&["Home.md", "Other.md"]);
+        app.open_note("Home.md", false);
+        let ctx = egui::Context::default();
+        app.follow_link(
+            preview::LinkTarget::Note {
+                rel: "Other.md".into(),
+                heading: Some("Section".into()),
+            },
+            &ctx,
+        );
+        assert_eq!(active_rel(&app), "Other.md");
+        assert_eq!(app.tabs[app.active_tab].scroll_to_heading.as_deref(), Some("Section"));
+    }
+
+    #[test]
+    fn external_link_opens_in_browser_not_as_note() {
+        let (_d, mut app) = app_with_notes(&["Home.md"]);
+        app.open_note("Home.md", false);
+        let ctx = egui::Context::default();
+        app.follow_link(preview::LinkTarget::External("mailto:x@y.z".into()), &ctx);
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(vault_rels(&app), vec!["Home.md"]);
+        let opened = ctx.output(|o| {
+            o.commands.iter().any(|c| {
+                matches!(c, egui::OutputCommand::OpenUrl(u) if u.url == "mailto:x@y.z")
+            })
+        });
+        assert!(opened, "ctx.open_url must have been called");
     }
 }
