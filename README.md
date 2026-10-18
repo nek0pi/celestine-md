@@ -132,7 +132,7 @@ Tagged releases ship **Linux x86_64**, **macOS** (Intel + Apple Silicon), and **
 
 ```bash
 # Linux / macOS example
-tar -xzf celestine-linux-x86_64-v0.3.0.tar.gz
+tar -xzf celestine-linux-x86_64-v0.3.1.tar.gz
 ./celestine-linux-x86_64/install.sh          # → ~/.local/bin/celestine
 celestine ~/Notes
 ```

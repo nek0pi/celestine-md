@@ -276,8 +276,16 @@ impl Keymap {
 
         let text_input_active = ctx.memory(|m| m.focused().is_some());
 
-        let pairs: Vec<(Command, KeyboardShortcut)> =
+        // egui's consume_shortcut uses Modifiers::matches_logically, which
+        // ignores *extra* Shift/Alt. So Mod+F would also match Mod+Shift+F
+        // unless the more-specific chord is tried first (egui's own guidance).
+        let mut pairs: Vec<(Command, KeyboardShortcut)> =
             self.shortcuts.iter().map(|(c, s)| (*c, *s)).collect();
+        pairs.sort_by(|(_, a), (_, b)| {
+            modifier_specificity(b.modifiers)
+                .cmp(&modifier_specificity(a.modifiers))
+                .then_with(|| format!("{a:?}").cmp(&format!("{b:?}")))
+        });
 
         for (cmd, sc) in pairs {
             // Don't steal Delete from a text field.
@@ -371,6 +379,10 @@ fn command_from_id(id: &str) -> Option<Command> {
         "reveal_in_tree" => Command::RevealInTree,
         _ => return None,
     })
+}
+
+fn modifier_specificity(m: Modifiers) -> u8 {
+    m.command as u8 + m.ctrl as u8 + m.alt as u8 + m.shift as u8
 }
 
 fn parse_chord(s: &str) -> Option<KeyboardShortcut> {
@@ -553,6 +565,31 @@ mod tests {
         });
         frame(&ctx, key_press(Key::Delete, Modifiers::NONE), |ui| {
             assert_eq!(keymap.consume(ui.ctx()), Some(Command::DeleteItem));
+        });
+    }
+
+    #[test]
+    fn mod_shift_f_opens_vault_search_not_find() {
+        let keymap = Keymap::obsidian_defaults();
+        let ctx = egui::Context::default();
+        frame(&ctx, RawInput::default(), |_| {});
+        let mods = Modifiers::COMMAND | Modifiers::SHIFT;
+        frame(&ctx, key_press(Key::F, mods), |ui| {
+            assert_eq!(
+                keymap.consume(ui.ctx()),
+                Some(Command::VaultSearch),
+                "Ctrl/Cmd+Shift+F must not fall through to Find (Mod+F)"
+            );
+        });
+    }
+
+    #[test]
+    fn mod_f_still_opens_find() {
+        let keymap = Keymap::obsidian_defaults();
+        let ctx = egui::Context::default();
+        frame(&ctx, RawInput::default(), |_| {});
+        frame(&ctx, key_press(Key::F, Modifiers::COMMAND), |ui| {
+            assert_eq!(keymap.consume(ui.ctx()), Some(Command::Find));
         });
     }
 }
