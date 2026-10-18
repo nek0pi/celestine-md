@@ -1,11 +1,6 @@
 # Homebrew formula for CelestineMD (prebuilt binaries from GitHub Releases).
 #
-# Publish under your own tap:
-#   gh repo create nek0pi/homebrew-celestine --public --clone
-#   mkdir -p Formula && cp packaging/homebrew/celestine-md.rb Formula/
-#   git commit -am "celestine-md 0.3.0" && git push
-#   brew tap nek0pi/celestine
-#   brew install celestine-md
+# Tap: https://github.com/nek0pi/homebrew-celestine
 #
 # Users:
 #   brew tap nek0pi/celestine && brew install celestine-md
@@ -20,18 +15,18 @@ class CelestineMd < Formula
   on_macos do
     on_arm do
       url "https://github.com/nek0pi/celestine-md/releases/download/v0.3.0/celestine-macos-aarch64-v0.3.0.tar.gz"
-      sha256 "REPLACE_AFTER_RELEASE"
+      sha256 "abe342945a03929681b915d5cc56fd90c098924c7348ce8c60ea22b411ba004e"
     end
     on_intel do
       url "https://github.com/nek0pi/celestine-md/releases/download/v0.3.0/celestine-macos-x86_64-v0.3.0.tar.gz"
-      sha256 "REPLACE_AFTER_RELEASE"
+      sha256 "df19e5b8d2bc15b73b4d4257bae0cd2cfff6063ff50d206bfa4d24ee71aff2ff"
     end
   end
 
   on_linux do
     on_intel do
       url "https://github.com/nek0pi/celestine-md/releases/download/v0.3.0/celestine-linux-x86_64-v0.3.0.tar.gz"
-      sha256 "REPLACE_AFTER_RELEASE"
+      sha256 "1ef0892a4583873b7116d54f72000759d5aec3132492835ca9323864b86d66cb"
     end
   end
 

@@ -19,7 +19,7 @@ license=('MIT')
 depends=('libxkbcommon' 'libxcb' 'gtk3')
 makedepends=('cargo' 'clang' 'pkgconf')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP') # filled after v0.3.0 tag is pushed
+sha256sums=('b9fc4f15c9a56e11ac5f73eb2900872212e35eb6bf1c4add592aad70b9b24bc8')
 options=('!lto')
 
 prepare() {
