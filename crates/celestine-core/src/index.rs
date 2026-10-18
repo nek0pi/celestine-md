@@ -78,7 +78,7 @@ impl VaultIndex {
 
     pub fn upsert_file(&mut self, vault_root: &Path, path: &Path) -> Result<NoteId, CoreError> {
         let resolved = resolve_vault_abs(vault_root, path)?;
-        let ( path, rel) = canonical_note_target(resolved)?;
+        let (path, rel) = canonical_note_target(resolved)?;
         if !rel.to_lowercase().ends_with(".md") {
             return Err(CoreError::NoteNotFound(rel));
         }
@@ -148,7 +148,7 @@ impl VaultIndex {
     }
 
     pub fn remove_path(&mut self, vault_root: &Path, path: &Path) {
-        let Ok( rel) = checked_rel(vault_root,path) else {
+        let Ok(rel) = checked_rel(vault_root, path) else {
             return;
         };
         let key = normalize_rel(&rel);

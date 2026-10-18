@@ -392,8 +392,8 @@ fn differently_cased_linux_root_is_not_treated_as_the_same_directory() {
     let other = temp.path().join("notes");
     fs::create_dir(&root).unwrap();
     fs::create_dir(&other).unwrap();
-    fs::write(root.join("note.md"), "# Note\n").unwrap();
-    fs::write(other.join("note.md"), "# Other\n").unwrap();
+    fs::write(root.join("note.md"), "---\ntitle: Note\n---\n# Note\n").unwrap();
+    fs::write(other.join("note.md"), "---\ntitle: Other\n---\n# Other\n").unwrap();
     let mut index = VaultIndex::new();
     index.upsert_file(&root, &root.join("note.md")).unwrap();
 
