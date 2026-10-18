@@ -116,7 +116,7 @@ impl CelestineApp {
                 if crate::keybinds::is_omarchy() {
                     "terminal".into()
                 } else {
-                    "obsidian-dark".into()
+                    "neovoid".into()
                 }
             });
         let theme = load_theme(&theme_name).unwrap_or_default();

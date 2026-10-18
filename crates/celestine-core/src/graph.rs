@@ -61,7 +61,27 @@ impl LinkGraph {
     }
 
     pub fn degree(&self, id: NoteId) -> usize {
-        self.neighbors(id).len()
+        let Some(&idx) = self.note_to_node.get(&id) else {
+            return 0;
+        };
+        // Count without allocating a neighbor Vec (hot path for graph paint/layout).
+        self.graph.neighbors(idx).count()
+    }
+
+    /// Edges whose both endpoints are in `visible`.
+    pub fn edges_among(&self, visible: &HashSet<NoteId>) -> Vec<(NoteId, NoteId)> {
+        self.graph
+            .edge_references()
+            .filter_map(|e| {
+                let a = self.graph[e.source()];
+                let b = self.graph[e.target()];
+                if visible.contains(&a) && visible.contains(&b) {
+                    Some((a, b))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     pub fn backlinks(&self, index: &VaultIndex, target: NoteId) -> Vec<NoteId> {

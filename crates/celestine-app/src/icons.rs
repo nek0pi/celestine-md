@@ -60,7 +60,7 @@ fn path(name: &str) -> &'static str {
         "compass" => "M12 3a9 9 0 1 0 0.01 0 M16 8l-2.5 6.5L7 17l2.5-6.5z",
         "box" => "M21 8l-9-5-9 5v8l9 5 9-5z M3.3 7.5 12 12.5l8.7-5 M12 12.5V22",
         "layers" => "M12 2L2 7l10 5 10-5z M2 12l10 5 10-5 M2 17l10 5 10-5",
-        "search" => "M16.7 16.7 21 21 M11 3a8 8 0 1 0 0.01 0",
+        "search" => "M11 3a8 8 0 1 0 0.01 0 M16.7 16.7L21 21",
         "sliders" => "M4 21v-7 M4 10V3 M12 21v-9 M12 8V3 M20 21v-5 M20 12V3 M2 14h4 M10 8h4 M18 16h4",
         "settings" => "M12 9a3 3 0 1 0 0.01 0 M4.5 12h3 M16.5 12h3 M7.8 7.8l2.1 2.1 M14.1 14.1l2.1 2.1 M7.8 16.2l2.1-2.1 M14.1 9.9l2.1-2.1",
         "panel-left" => "M3 3h18v18H3z M9 3v18",
@@ -395,12 +395,14 @@ fn tessellate_arc(
     let dy = to.y - from.y;
     let dist = (dx * dx + dy * dy).sqrt();
     if dist < 0.01 {
-        // Degenerate: sample a ring around `to`.
-        let cx = to.x;
-        let cy = to.y;
+        // Lucide full-circle shorthand: `M(cx, cy-r) a r r 0 1 0 ε 0`.
+        // Center sits one radius below the start (top of the circle).
+        let cx = from.x;
+        let cy = from.y + ry;
         let dir = if sweep { 1.0 } else { -1.0 };
+        let a0 = -std::f32::consts::FRAC_PI_2;
         for i in 1..=n {
-            let a = dir * std::f32::consts::TAU * (i as f32 / n as f32);
+            let a = a0 + dir * std::f32::consts::TAU * (i as f32 / n as f32);
             poly.push(pos2(cx + rx * a.cos(), cy + ry * a.sin()));
         }
         return;
