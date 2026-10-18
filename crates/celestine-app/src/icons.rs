@@ -60,7 +60,9 @@ fn path(name: &str) -> &'static str {
         "compass" => "M12 3a9 9 0 1 0 0.01 0 M16 8l-2.5 6.5L7 17l2.5-6.5z",
         "box" => "M21 8l-9-5-9 5v8l9 5 9-5z M3.3 7.5 12 12.5l8.7-5 M12 12.5V22",
         "layers" => "M12 2L2 7l10 5 10-5z M2 12l10 5 10-5 M2 17l10 5 10-5",
-        "search" => "M11 3a8 8 0 1 0 0.01 0 M16.7 16.7L21 21",
+        // Two semicircles + handle (avoids Lucide's near-zero arc ε that our
+        // tessellator used to treat as a chord instead of a full circle).
+        "search" => "M3 11A8 8 0 1 1 19 11A8 8 0 1 1 3 11 M16.65 16.65L21 21",
         "sliders" => "M4 21v-7 M4 10V3 M12 21v-9 M12 8V3 M20 21v-5 M20 12V3 M2 14h4 M10 8h4 M18 16h4",
         "settings" => "M12 9a3 3 0 1 0 0.01 0 M4.5 12h3 M16.5 12h3 M7.8 7.8l2.1 2.1 M14.1 14.1l2.1 2.1 M7.8 16.2l2.1-2.1 M14.1 9.9l2.1-2.1",
         "panel-left" => "M3 3h18v18H3z M9 3v18",
@@ -394,8 +396,9 @@ fn tessellate_arc(
     let dx = to.x - from.x;
     let dy = to.y - from.y;
     let dist = (dx * dx + dy * dy).sqrt();
-    if dist < 0.01 {
-        // Lucide full-circle shorthand: `M(cx, cy-r) a r r 0 1 0 ε 0`.
+    // Lucide full-circle shorthand: `M(cx, cy-r) a r r 0 1 0 ε 0` with ε≈0.01.
+    // Must use `<=` — a strict `< 0.01` missed the common ε and left only dots.
+    if dist <= 0.02 {
         // Center sits one radius below the start (top of the circle).
         let cx = from.x;
         let cy = from.y + ry;
@@ -427,5 +430,50 @@ fn tessellate_arc(
     for i in 1..=n {
         let a = a0 + delta * (i as f32 / n as f32);
         poly.push(pos2(cx + rx * a.cos(), cy + ry * a.sin()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_icon_is_a_magnifying_glass_not_dots() {
+        let mut strokes = Vec::new();
+        parse_path(path("search"), &mut strokes);
+        // Circle (many points) + handle (2 points). Lone single-point strokes
+        // are what paint() renders as the “two dots” LED marks.
+        assert!(
+            strokes.iter().any(|s| s.len() >= 8),
+            "expected a tessellated lens circle, got {strokes:?}"
+        );
+        assert!(
+            strokes.iter().any(|s| s.len() >= 2 && {
+                let a = s.first().unwrap();
+                let b = s.last().unwrap();
+                (*a - *b).length() > 3.0
+            }),
+            "expected a diagonal handle stroke, got {strokes:?}"
+        );
+        assert!(
+            strokes.iter().all(|s| s.len() != 1),
+            "single-point strokes paint as dots: {strokes:?}"
+        );
+    }
+
+    #[test]
+    fn lucide_epsilon_arc_draws_a_full_circle() {
+        let mut strokes = Vec::new();
+        // Same shorthand globe/camera/settings use.
+        parse_path("M11 3a8 8 0 1 0 0.01 0", &mut strokes);
+        let pts: usize = strokes.iter().map(|s| s.len()).sum();
+        assert!(pts >= 12, "ε-arc should tessellate a circle, got {strokes:?}");
+        let xs: Vec<f32> = strokes.iter().flat_map(|s| s.iter().map(|p| p.x)).collect();
+        let ys: Vec<f32> = strokes.iter().flat_map(|s| s.iter().map(|p| p.y)).collect();
+        let span_x = xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max)
+            - xs.iter().cloned().fold(f32::INFINITY, f32::min);
+        let span_y = ys.iter().cloned().fold(f32::NEG_INFINITY, f32::max)
+            - ys.iter().cloned().fold(f32::INFINITY, f32::min);
+        assert!(span_x > 10.0 && span_y > 10.0, "circle too flat: {span_x}×{span_y}");
     }
 }
