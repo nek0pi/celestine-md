@@ -2,9 +2,11 @@ use crate::file_tree;
 use crate::graph_view::GraphState;
 use crate::keybinds::{ensure_user_config, Command, Keymap};
 use crate::md_edit;
+use crate::md_table::{self, Segment};
 use crate::outline_tree;
 use crate::preview;
 use crate::state::AppState;
+use crate::table_ui::{self, TableStyle};
 use crate::theme_apply::{self, color, naked_button, naked_icon, sidebar_toggle};
 use crate::update_check::UpdateChecker;
 use celestine_core::{extract_note_data, NoteId, Vault};
@@ -60,16 +62,20 @@ struct OpenTab {
 
 /// Brief highlight after jumping to a find / search hit.
 struct LineFlash {
-    /// 0-based source line in the note buffer.
+    /// 0-based source line in the note buffer (editor flash).
     line_0: usize,
-    /// Text used to locate the block in preview (usually the find query).
+    /// Normalized line text for preview block matching (not the raw query).
     needle: String,
+    /// Which matching preview block to target (0-based).
+    occurrence: usize,
     started: Instant,
     /// Scroll-to-center still pending.
     do_scroll: bool,
+    /// Frames spent trying to scroll in preview before giving up.
+    scroll_frames: u8,
 }
 
-const LINE_FLASH_SECS: f32 = 0.95;
+const LINE_FLASH_SECS: f32 = 1.85;
 
 pub struct CelestineApp {
     vault: Option<Vault>,
@@ -698,6 +704,10 @@ impl CelestineApp {
         self.overlay_anim = 0.0;
         self.editor_focused = false;
         self.overlay_focus_pending = true;
+        // Drop any in-flight wash so a new find session starts clean.
+        if matches!(o, Overlay::Find | Overlay::VaultSearch) {
+            self.line_flash = None;
+        }
     }
 
     fn pick_vault_dialog(&mut self, ctx: &egui::Context) {
@@ -1805,6 +1815,8 @@ impl eframe::App for CelestineApp {
                 let fill_w = ui.available_width().max(1.0);
                 let preferred_pad = self.persist.note_h_pad;
                 const MIN_TEXT_W: f32 = 200.0_f32;
+                /// Top/bottom breathing room inside the note scroll (preview + edit).
+                const NOTE_V_PAD: f32 = 28.0_f32;
 
                 if preview_mode {
                     self.editor_focus_pending = false;
@@ -1814,16 +1826,13 @@ impl eframe::App for CelestineApp {
                         parsed.body
                     };
                     let scroll_heading = self.tabs[tab_idx].scroll_to_heading.clone();
-                    let flash_alpha = self.line_flash_alpha();
-                    let flash_needle = self
-                        .line_flash
-                        .as_ref()
-                        .map(|f| f.needle.clone());
-                    let scroll_text = self
-                        .line_flash
-                        .as_ref()
-                        .filter(|f| f.do_scroll)
-                        .map(|f| f.needle.clone());
+                    let flash_alpha = self.line_flash_alpha().unwrap_or(0.0);
+                    let find_focus = self.line_flash.as_ref().map(|f| preview::PreviewFindFocus {
+                        needle: f.needle.clone(),
+                        occurrence: f.occurrence,
+                        alpha: flash_alpha,
+                        do_scroll: f.do_scroll,
+                    });
                     let outcome = if let Some(vault) = &self.vault {
                         let image_rels = self.image_rels
                             .get_or_insert_with(|| vault.list_image_rel_paths());
@@ -1838,7 +1847,7 @@ impl eframe::App for CelestineApp {
                                 let inner_w = ui.available_width().max(1.0);
                                 let (pad, text_w) =
                                     note_side_pad(inner_w, 0.0, preferred_pad, MIN_TEXT_W);
-                                ui.horizontal(|ui| {
+                                let outcome = ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 0.0;
                                     ui.add_space(pad);
                                     ui.allocate_ui_with_layout(
@@ -1857,11 +1866,10 @@ impl eframe::App for CelestineApp {
                                                 accent,
                                                 muted,
                                                 text_c,
+                                                palette.border,
                                                 md_font,
                                                 scroll_heading.as_deref(),
-                                                scroll_text.as_deref(),
-                                                flash_needle.as_deref(),
-                                                flash_alpha.unwrap_or(0.0),
+                                                find_focus.as_ref(),
                                                 &palette.heading,
                                                 &mut self.image_resolver,
                                             )
@@ -1871,6 +1879,7 @@ impl eframe::App for CelestineApp {
                                 })
                                 .inner;
                                 ui.add_space(NOTE_V_PAD);
+                                outcome
                             })
                             .inner
                     } else {
@@ -1887,9 +1896,14 @@ impl eframe::App for CelestineApp {
                             tab.scroll_to_char = None;
                         }
                     }
-                    if outcome.find_scrolled {
-                        if let Some(flash) = self.line_flash.as_mut() {
+                    if let Some(flash) = self.line_flash.as_mut() {
+                        if outcome.find_scrolled {
                             flash.do_scroll = false;
+                        } else if flash.do_scroll {
+                            flash.scroll_frames = flash.scroll_frames.saturating_add(1);
+                            if flash.scroll_frames > 45 {
+                                flash.do_scroll = false;
+                            }
                         }
                     }
                     if let Some(link) = outcome.link {
@@ -1922,9 +1936,15 @@ impl eframe::App for CelestineApp {
                         .unwrap_or(false);
                     let gutter_w = line_gutter_width(stats.lines, md_font);
                     let gutter_gap = 6.0_f32;
-                    let row_h = (md_font * 1.35).max(1.0);
-                    let desired_rows =
-                        ((fill_h / row_h).ceil() as usize).clamp(24, 200);
+                    let table_style = TableStyle {
+                        border: palette.border,
+                        accent,
+                        text: text_c,
+                        muted,
+                        content_bg: palette.content_bg,
+                        panel_bg: palette.panel_bg,
+                        font_size: md_font,
+                    };
                     let (changed, focused) = ScrollArea::vertical()
                         .id_salt("editor-scroll")
                         .auto_shrink([false, false])
@@ -1932,6 +1952,7 @@ impl eframe::App for CelestineApp {
                         .min_scrolled_height(fill_h)
                         .show(ui, |ui| {
                             ui.set_min_height(fill_h);
+                            ui.add_space(NOTE_V_PAD);
                             let inner_w = ui.available_width().max(1.0);
                             let (pad, text_w) = note_side_pad(
                                 inner_w,
@@ -1939,140 +1960,376 @@ impl eframe::App for CelestineApp {
                                 preferred_pad,
                                 MIN_TEXT_W,
                             );
-                            ui.horizontal(|ui| {
-                                // Manual gaps only — avoid item_spacing blowing past inner_w.
+                            let result = ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 0.0;
                                 let headings = palette.heading;
-                                let mut layouter =
-                                    |ui: &egui::Ui,
-                                     text: &dyn egui::TextBuffer,
-                                     wrap_width: f32| {
-                                        let text = text.as_str();
-                                        let w = if wrap_width.is_finite()
-                                            && wrap_width > 1.0
-                                        {
-                                            wrap_width.min(text_w)
-                                        } else {
-                                            text_w
-                                        };
-                                        md_edit::layout(
-                                            ui,
-                                            text,
-                                            w,
-                                            md_font,
-                                            text_c,
-                                            muted,
-                                            accent,
-                                            &headings,
-                                        )
-                                    };
-
-                                // Far-left line gutter (scrolls with content).
-                                let gutter_placeholder = ui
-                                    .allocate_exact_size(
-                                        egui::vec2(gutter_w, fill_h),
-                                        egui::Sense::hover(),
-                                    )
-                                    .0;
-                                ui.add_space(gutter_gap + pad);
-
                                 let editor_live = self.focus != FocusPane::Files;
-                                let te = TextEdit::multiline(
-                                    &mut self.tabs[tab_idx].buffer,
-                                )
-                                .id(text_id)
-                                .font(font)
-                                .frame(egui::Frame::NONE)
-                                .desired_width(text_w)
-                                .desired_rows(desired_rows)
-                                .interactive(editor_live)
-                                .layouter(&mut layouter);
-                                let mut out = te.show(ui);
+
+                                let buf_snapshot = self.tabs[tab_idx].buffer.clone();
+                                let segments = md_table::segment_note(&buf_snapshot);
+                                let mut work: Vec<EditorSeg> = segments
+                                    .iter()
+                                    .map(|s| match s {
+                                        Segment::Text { range } => EditorSeg::Text(
+                                            buf_snapshot[range.clone()].to_string(),
+                                        ),
+                                        Segment::Table { table, range } => EditorSeg::Table {
+                                            table: table.clone(),
+                                            src_lines: md_table::line_count_in_range(
+                                                &buf_snapshot,
+                                                range,
+                                            )
+                                            .max(2),
+                                        },
+                                    })
+                                    .collect();
+
+                                let jump_byte = jump_char
+                                    .map(|c| md_table::char_to_byte(&buf_snapshot, c));
+                                let jump_seg = jump_byte.and_then(|b| {
+                                    let n = segments.len();
+                                    segments.iter().enumerate().position(|(i, s)| {
+                                        let r = match s {
+                                            Segment::Text { range }
+                                            | Segment::Table { range, .. } => range,
+                                        };
+                                        if r.start == r.end {
+                                            return false;
+                                        }
+                                        // EOF caret belongs to the last segment.
+                                        if b >= buf_snapshot.len() {
+                                            return i + 1 == n;
+                                        }
+                                        b >= r.start && b < r.end
+                                    })
+                                });
+
+                                let gutter_origin = ui.cursor().min;
+                                ui.add_space(gutter_w + gutter_gap + pad);
+
+                                let mut any_changed = false;
+                                let mut any_focused = false;
+                                let mut line_base_1 = 1usize;
+                                let mut gutter_text: Vec<GutterTextSeg> = Vec::new();
+                                let mut gutter_blocks: Vec<GutterBlockSeg> = Vec::new();
+                                let mut jump_done = false;
+                                let mut flash_rect: Option<egui::Rect> = None;
+                                let content_top = ui.cursor().min.y;
+
+                                let row_h_est = (md_font * 1.35).max(1.0);
+                                let fill_rows =
+                                    ((fill_h / row_h_est).ceil() as usize).clamp(24, 200);
+                                let last_text_si = work.iter().rposition(|s| {
+                                    matches!(s, EditorSeg::Text(_))
+                                });
+
+                                ui.vertical(|ui| {
+                                    ui.set_max_width(text_w);
+                                    ui.spacing_mut().item_spacing.y = 4.0;
+
+                                    for (si, seg) in work.iter_mut().enumerate() {
+                                        match seg {
+                                            EditorSeg::Text(text) => {
+                                                let seg_lines = if text.is_empty() {
+                                                    1
+                                                } else {
+                                                    text.bytes().filter(|&b| b == b'\n').count()
+                                                        + if text.ends_with('\n') {
+                                                            0
+                                                        } else {
+                                                            1
+                                                        }
+                                                }
+                                                .max(1);
+                                                let desired = if last_text_si == Some(si) {
+                                                    seg_lines.max(fill_rows)
+                                                } else {
+                                                    seg_lines
+                                                };
+                                                let mut layouter = |ui: &egui::Ui,
+                                                                    text: &dyn egui::TextBuffer,
+                                                                    wrap_width: f32| {
+                                                    let text = text.as_str();
+                                                    let w = if wrap_width.is_finite()
+                                                        && wrap_width > 1.0
+                                                    {
+                                                        wrap_width.min(text_w)
+                                                    } else {
+                                                        text_w
+                                                    };
+                                                    md_edit::layout(
+                                                        ui,
+                                                        text,
+                                                        w,
+                                                        md_font,
+                                                        text_c,
+                                                        muted,
+                                                        accent,
+                                                        &headings,
+                                                    )
+                                                };
+                                                let te = TextEdit::multiline(text)
+                                                    .id(text_id.with(("seg", si)))
+                                                    .font(font.clone())
+                                                    .frame(egui::Frame::NONE)
+                                                    .desired_width(text_w)
+                                                    .desired_rows(desired)
+                                                    .interactive(editor_live)
+                                                    .layouter(&mut layouter);
+                                                let mut out = te.show(ui);
+                                                if out.response.changed() {
+                                                    any_changed = true;
+                                                }
+                                                if out.response.has_focus() {
+                                                    any_focused = true;
+                                                }
+
+                                                if jump_seg == Some(si) && !jump_done {
+                                                    if let (Some(char_pos), Some(byte)) =
+                                                        (jump_char, jump_byte)
+                                                    {
+                                                        let range = match &segments[si] {
+                                                            Segment::Text { range } => range,
+                                                            Segment::Table { range, .. } => {
+                                                                range
+                                                            }
+                                                        };
+                                                        let rel = char_pos.saturating_sub(
+                                                            md_table::byte_to_char(
+                                                                &buf_snapshot,
+                                                                range.start,
+                                                            ),
+                                                        );
+                                                        let id = out.response.id;
+                                                        out.response.request_focus();
+                                                        out.state.cursor.set_char_range(
+                                                            Some(CCursorRange::one(
+                                                                CCursor::new(rel),
+                                                            )),
+                                                        );
+                                                        out.state.store(ui.ctx(), id);
+                                                        ui.scroll_to_cursor(Some(
+                                                            egui::Align::Center,
+                                                        ));
+                                                        let _ = byte;
+                                                        jump_done = true;
+                                                        self.editor_focus_pending = false;
+                                                        if let Some(flash) =
+                                                            self.line_flash.as_mut()
+                                                        {
+                                                            flash.do_scroll = false;
+                                                        }
+                                                    }
+                                                }
+
+                                                if let Some(line_0) = flash_line_0 {
+                                                    let seg_start_line =
+                                                        line_base_1.saturating_sub(1);
+                                                    let seg_end_line =
+                                                        seg_start_line + seg_lines;
+                                                    if line_0 >= seg_start_line
+                                                        && line_0 < seg_end_line
+                                                    {
+                                                        let local = line_0 - seg_start_line;
+                                                        if let Some(rect) = source_line_rect(
+                                                            &out.galley,
+                                                            out.galley_pos,
+                                                            local,
+                                                            text_w,
+                                                        ) {
+                                                            flash_rect = Some(rect);
+                                                            if flash_do_scroll {
+                                                                ui.scroll_to_rect(
+                                                                    rect,
+                                                                    Some(
+                                                                        egui::Align::Center,
+                                                                    ),
+                                                                );
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
+                                                gutter_text.push(GutterTextSeg {
+                                                    start_line_1: line_base_1,
+                                                    galley: out.galley.clone(),
+                                                    galley_pos: out.galley_pos,
+                                                });
+                                                line_base_1 += seg_lines;
+
+                                                if !editor_live {
+                                                    out.response.surrender_focus();
+                                                }
+                                            }
+                                            EditorSeg::Table { table, src_lines } => {
+                                                let table_top = ui.cursor().min.y;
+                                                let mut tbl = table.clone();
+                                                let edited = ui
+                                                    .add_enabled_ui(editor_live, |ui| {
+                                                        table_ui::show_editable(
+                                                            ui,
+                                                            &mut tbl,
+                                                            table_style,
+                                                            text_id.with(("tbl", si)),
+                                                        )
+                                                    })
+                                                    .inner;
+                                                if edited {
+                                                    *table = tbl;
+                                                    any_changed = true;
+                                                }
+                                                let table_bottom = ui.cursor().min.y;
+                                                let table_h =
+                                                    (table_bottom - table_top).max(24.0);
+
+                                                if jump_seg == Some(si) && !jump_done {
+                                                    let rect = egui::Rect::from_min_size(
+                                                        egui::pos2(
+                                                            ui.min_rect().min.x,
+                                                            table_top,
+                                                        ),
+                                                        egui::vec2(text_w, table_h),
+                                                    );
+                                                    ui.scroll_to_rect(
+                                                        rect,
+                                                        Some(egui::Align::Center),
+                                                    );
+                                                    jump_done = true;
+                                                    self.editor_focus_pending = false;
+                                                    if let Some(flash) =
+                                                        self.line_flash.as_mut()
+                                                    {
+                                                        flash.do_scroll = false;
+                                                    }
+                                                }
+
+                                                if let Some(line_0) = flash_line_0 {
+                                                    let seg_start_line =
+                                                        line_base_1.saturating_sub(1);
+                                                    let n = (*src_lines).max(1);
+                                                    if line_0 >= seg_start_line
+                                                        && line_0 < seg_start_line + n
+                                                    {
+                                                        let rect =
+                                                            egui::Rect::from_min_size(
+                                                                egui::pos2(
+                                                                    ui.min_rect().min.x,
+                                                                    table_top,
+                                                                ),
+                                                                egui::vec2(
+                                                                    text_w, table_h,
+                                                                ),
+                                                            );
+                                                        flash_rect = Some(rect);
+                                                        if flash_do_scroll {
+                                                            ui.scroll_to_rect(
+                                                                rect,
+                                                                Some(
+                                                                    egui::Align::Center,
+                                                                ),
+                                                            );
+                                                        }
+                                                    }
+                                                }
+
+                                                gutter_blocks.push(GutterBlockSeg {
+                                                    start_line_1: line_base_1,
+                                                    y: table_top,
+                                                    h: table_h,
+                                                    n_lines: (*src_lines).max(1),
+                                                });
+                                                line_base_1 += (*src_lines).max(1);
+                                            }
+                                        }
+                                    }
+
+                                    if self.editor_focus_pending && editor_live && !jump_done
+                                    {
+                                        // Focus first text segment if any.
+                                        if let Some(si) =
+                                            work.iter().position(|s| matches!(s, EditorSeg::Text(_)))
+                                        {
+                                            ui.memory_mut(|m| {
+                                                m.request_focus(
+                                                    text_id.with(("seg", si)),
+                                                );
+                                            });
+                                        }
+                                        self.editor_focus_pending = false;
+                                    }
+                                    if flash_do_scroll {
+                                        if let Some(flash) = self.line_flash.as_mut() {
+                                            flash.do_scroll = false;
+                                        }
+                                    }
+                                });
 
                                 ui.add_space(pad);
 
-                                let need_h = fill_h.max(out.galley.size().y);
-                                if let Some(char_pos) = jump_char {
-                                    let id = out.response.id;
-                                    out.response.request_focus();
-                                    out.state.cursor.set_char_range(Some(
-                                        CCursorRange::one(CCursor::new(char_pos)),
-                                    ));
-                                    out.state.store(ui.ctx(), id);
-                                    ui.scroll_to_cursor(Some(egui::Align::Center));
-                                    self.editor_focus_pending = false;
-                                    if let Some(flash) = self.line_flash.as_mut() {
-                                        flash.do_scroll = false;
-                                    }
-                                } else if flash_do_scroll {
-                                    if let Some(line_0) = flash_line_0 {
-                                        if let Some(rect) = source_line_rect(
-                                            &out.galley,
-                                            out.galley_pos,
-                                            line_0,
-                                            text_w,
-                                        ) {
-                                            ui.scroll_to_rect(
-                                                rect,
-                                                Some(egui::Align::Center),
-                                            );
-                                        }
-                                    }
-                                    if let Some(flash) = self.line_flash.as_mut() {
-                                        flash.do_scroll = false;
-                                    }
-                                    if self.editor_focus_pending && editor_live {
-                                        out.response.request_focus();
-                                        self.editor_focus_pending = false;
-                                    }
-                                } else if self.editor_focus_pending && editor_live {
-                                    out.response.request_focus();
-                                    self.editor_focus_pending = false;
-                                }
-                                if !editor_live {
-                                    out.response.surrender_focus();
-                                }
+                                let content_bottom = ui.min_rect().max.y.max(content_top);
+                                let need_h =
+                                    fill_h.max(content_bottom - gutter_origin.y);
 
-                                if let (Some(alpha), Some(line_0)) =
-                                    (flash_alpha, flash_line_0)
+                                if let (Some(alpha), Some(rect)) =
+                                    (flash_alpha, flash_rect)
                                 {
-                                    if let Some(rect) = source_line_rect(
-                                        &out.galley,
-                                        out.galley_pos,
-                                        line_0,
-                                        text_w,
-                                    ) {
-                                        // Soft wash — keep text readable.
-                                        let a = (alpha * 55.0).clamp(0.0, 255.0) as u8;
-                                        ui.painter().rect_filled(
-                                            rect.expand2(egui::vec2(4.0, 1.0)),
-                                            3.0,
-                                            egui::Color32::from_rgba_unmultiplied(
-                                                accent.r(),
-                                                accent.g(),
-                                                accent.b(),
-                                                a,
-                                            ),
-                                        );
-                                    }
+                                    ui.painter().rect_filled(
+                                        rect.expand2(egui::vec2(4.0, 1.0)),
+                                        3.0,
+                                        preview::find_flash_fill(alpha),
+                                    );
                                 }
 
                                 let gutter_rect = egui::Rect::from_min_size(
-                                    gutter_placeholder.min,
+                                    gutter_origin,
                                     egui::vec2(gutter_w, need_h),
                                 );
-                                paint_line_numbers(
-                                    ui,
-                                    gutter_rect,
-                                    &out.galley,
-                                    out.galley_pos,
-                                    md_font,
-                                    muted,
-                                );
+                                for g in &gutter_text {
+                                    paint_line_numbers_from(
+                                        ui,
+                                        gutter_rect,
+                                        &g.galley,
+                                        g.galley_pos,
+                                        md_font,
+                                        muted,
+                                        g.start_line_1,
+                                    );
+                                }
+                                for g in &gutter_blocks {
+                                    paint_block_line_numbers(
+                                        ui,
+                                        gutter_rect,
+                                        g.y,
+                                        g.h,
+                                        g.start_line_1,
+                                        g.n_lines,
+                                        md_font,
+                                        muted,
+                                    );
+                                }
 
-                                (out.response.changed(), out.response.has_focus())
+                                if any_changed {
+                                    let mut new_buf = String::with_capacity(
+                                        buf_snapshot.len() + 64,
+                                    );
+                                    for seg in &work {
+                                        match seg {
+                                            EditorSeg::Text(t) => new_buf.push_str(t),
+                                            EditorSeg::Table { table, .. } => {
+                                                new_buf.push_str(&md_table::serialize(
+                                                    table,
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    self.tabs[tab_idx].buffer = new_buf;
+                                }
+
+                                (any_changed, any_focused)
                             })
-                            .inner
+                            .inner;
+                            ui.add_space(NOTE_V_PAD);
+                            result
                         })
                         .inner;
                     if focused {
@@ -2545,8 +2802,8 @@ impl CelestineApp {
             return None;
         }
         let u = 1.0 - t / LINE_FLASH_SECS;
-        // Ease-out so the wash is strongest right after the jump.
-        Some(u * u)
+        // Stay bright longer, then ease out (pow < 1).
+        Some(u.powf(0.55))
     }
 
     fn ui_find(
@@ -2625,17 +2882,29 @@ impl CelestineApp {
         if let Some(i) = chosen {
             if let Some((_char_off, line_1based, _snippet)) = hits.get(i) {
                 let line_0 = line_1based.saturating_sub(1);
-                let needle = self.find_query.trim().to_string();
-                let (end_char, in_preview) = self
+                let query = self.find_query.trim().to_string();
+                let (end_char, in_preview, flash) = self
                     .tabs
                     .get(self.active_tab)
                     .map(|t| {
                         (
                             char_offset_end_of_line(&t.buffer, line_0),
                             t.preview_mode,
+                            line_flash_for_buffer(&t.buffer, line_0, &query),
                         )
                     })
-                    .unwrap_or((0, false));
+                    .unwrap_or((
+                        0,
+                        false,
+                        LineFlash {
+                            line_0,
+                            needle: query.to_lowercase(),
+                            occurrence: 0,
+                            started: Instant::now(),
+                            do_scroll: true,
+                            scroll_frames: 0,
+                        },
+                    ));
                 self.overlay = Overlay::None;
                 if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                     if in_preview {
@@ -2649,12 +2918,7 @@ impl CelestineApp {
                     tab.scroll_to_line = None;
                     tab.scroll_to_heading = None;
                 }
-                self.line_flash = Some(LineFlash {
-                    line_0,
-                    needle,
-                    started: Instant::now(),
-                    do_scroll: true,
-                });
+                self.line_flash = Some(flash);
                 self.focus = FocusPane::Editor;
                 self.editor_focus_pending = !in_preview;
             }
@@ -2733,17 +2997,35 @@ impl CelestineApp {
             if let Some(hit) = hits.get(i) {
                 let rel = hit.rel.clone();
                 let line_0 = hit.line_1based.saturating_sub(1);
-                let needle = if self.overlay_query.trim().is_empty() {
+                let query = if self.overlay_query.trim().is_empty() {
                     hit.snippet.clone()
                 } else {
                     self.overlay_query.trim().to_string()
                 };
                 self.overlay = Overlay::None;
                 self.open_path(&rel, true);
-                let end_char = self
+                let (end_char, flash) = self
                     .tabs
                     .get(self.active_tab)
-                    .map(|t| char_offset_end_of_line(&t.buffer, line_0));
+                    .map(|t| {
+                        (
+                            Some(char_offset_end_of_line(&t.buffer, line_0)),
+                            line_flash_for_buffer(&t.buffer, line_0, &query),
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        (
+                            None,
+                            LineFlash {
+                                line_0,
+                                needle: preview::normalize_find_needle(&query),
+                                occurrence: 0,
+                                started: Instant::now(),
+                                do_scroll: true,
+                                scroll_frames: 0,
+                            },
+                        )
+                    });
                 if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                     if let Some(end) = end_char {
                         tab.scroll_to_char = Some(end);
@@ -2754,12 +3036,7 @@ impl CelestineApp {
                     }
                     tab.scroll_to_heading = None;
                 }
-                self.line_flash = Some(LineFlash {
-                    line_0,
-                    needle,
-                    started: Instant::now(),
-                    do_scroll: true,
-                });
+                self.line_flash = Some(flash);
                 self.focus = FocusPane::Editor;
                 self.editor_focus_pending = true;
             }
@@ -3042,6 +3319,33 @@ mod recent_notes_boundary_tests {
     }
 }
 
+fn line_flash_for_buffer(buffer: &str, line_0: usize, query_fallback: &str) -> LineFlash {
+    let raw = buffer.lines().nth(line_0).unwrap_or("");
+    let mut needle = preview::normalize_find_needle(raw);
+    if needle.chars().count() < 3 {
+        needle = preview::normalize_find_needle(query_fallback);
+    }
+    // Count earlier source lines with the same normalized text so preview can
+    // target the Nth matching block instead of the first / every match.
+    let occurrence = if needle.is_empty() {
+        0
+    } else {
+        buffer
+            .lines()
+            .take(line_0)
+            .filter(|l| preview::normalize_find_needle(l) == needle)
+            .count()
+    };
+    LineFlash {
+        line_0,
+        needle,
+        occurrence,
+        started: Instant::now(),
+        do_scroll: true,
+        scroll_frames: 0,
+    }
+}
+
 /// Case-insensitive substring hits in a note buffer.
 /// Returns `(char_offset, line_1based, snippet)`.
 fn find_in_buffer_hits(buffer: &str, query: &str) -> Vec<(usize, usize, String)> {
@@ -3233,6 +3537,19 @@ mod search_helpers_tests {
         );
         assert!(hits.iter().any(|h| h.snippet.contains("UniqueZebraPhrase")));
     }
+
+    #[test]
+    fn line_flash_targets_nth_duplicate_line_not_the_query() {
+        let buf = "# Title\nrepeat me\nother\nrepeat me\n";
+        let flash0 = line_flash_for_buffer(buf, 1, "repeat");
+        let flash1 = line_flash_for_buffer(buf, 3, "repeat");
+        assert_eq!(flash0.needle, "repeat me");
+        assert_eq!(flash1.needle, "repeat me");
+        assert_eq!(flash0.occurrence, 0);
+        assert_eq!(flash1.occurrence, 1);
+        assert_eq!(preview::normalize_find_needle("## Hello World"), "hello world");
+        assert_eq!(preview::normalize_find_needle("- list item"), "list item");
+    }
 }
 
 fn char_offset_at_line(text: &str, line: usize) -> usize {
@@ -3385,17 +3702,39 @@ fn note_side_pad(inner_w: f32, chrome: f32, preferred_pad: f32, min_text: f32) -
     (pad, text_w)
 }
 
-fn paint_line_numbers(
+enum EditorSeg {
+    Text(String),
+    Table {
+        table: md_table::MdTable,
+        src_lines: usize,
+    },
+}
+
+struct GutterTextSeg {
+    start_line_1: usize,
+    galley: std::sync::Arc<egui::Galley>,
+    galley_pos: egui::Pos2,
+}
+
+struct GutterBlockSeg {
+    start_line_1: usize,
+    y: f32,
+    h: f32,
+    n_lines: usize,
+}
+
+fn paint_line_numbers_from(
     ui: &Ui,
     gutter_rect: egui::Rect,
     galley: &egui::Galley,
     galley_pos: egui::Pos2,
     font_size: f32,
     color: egui::Color32,
+    start_line_1: usize,
 ) {
     let painter = ui.painter_at(gutter_rect);
     let font = FontId::monospace(font_size * 0.9);
-    let mut src_line = 1usize;
+    let mut src_line = start_line_1;
     let mut at_line_start = true;
     for row in &galley.rows {
         if at_line_start {
@@ -3414,6 +3753,34 @@ fn paint_line_numbers(
         } else {
             at_line_start = false;
         }
+    }
+}
+
+fn paint_block_line_numbers(
+    ui: &Ui,
+    gutter_rect: egui::Rect,
+    y: f32,
+    h: f32,
+    start_line_1: usize,
+    n_lines: usize,
+    font_size: f32,
+    color: egui::Color32,
+) {
+    if n_lines == 0 || h <= 1.0 {
+        return;
+    }
+    let painter = ui.painter_at(gutter_rect);
+    let font = FontId::monospace(font_size * 0.9);
+    let step = h / n_lines as f32;
+    for i in 0..n_lines {
+        let ly = y + i as f32 * step + 2.0;
+        painter.text(
+            egui::pos2(gutter_rect.right() - 4.0, ly),
+            egui::Align2::RIGHT_TOP,
+            format!("{}", start_line_1 + i),
+            font.clone(),
+            color,
+        );
     }
 }
 

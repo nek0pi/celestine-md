@@ -19,9 +19,10 @@ GitHub Actions (`.github/workflows/release.yml`) builds **Linux**, **macOS** (In
 
 | Channel | Ready in-repo? | Needs your action |
 |---------|----------------|-------------------|
-| **GitHub Releases** (binaries) | ✅ workflow | `gh auth login`, push tag |
-| **Homebrew** | ✅ formula draft | Create tap `nek0pi/homebrew-celestine`, fill `sha256`, `brew tap` |
-| **Arch AUR** | ✅ `PKGBUILD` | AUR account + push package |
+| **GitHub Releases** (binaries) | ✅ workflow + `v0.2.0` live | Push tags when cutting releases |
+| **Linux one-liner** | ✅ `packaging/install-from-release.sh` | None after script is on `main` |
+| **Homebrew** | ✅ binary formula (`0.2.0` checksums) | Create tap `nek0pi/homebrew-celestine`, push formula |
+| **Arch AUR** | ✅ `PKGBUILD` (`0.2.0` checksum) | AUR account + push package |
 | **Flathub / Snap** | ❌ not set up | Separate packaging + review queues |
 
 I cannot publish to Homebrew core, AUR, or Flathub without your credentials and review processes.
@@ -56,23 +57,40 @@ Watch **Actions → Release**. When green, the GitHub Release page will have:
 
 ## 2. Homebrew (your tap)
 
-1. Create a public repo: `https://github.com/nek0pi/homebrew-celestine`
-2. Copy `packaging/homebrew/celestine-md.rb` → `Formula/celestine-md.rb`
-3. After the GitHub tag exists:
+The formula installs **prebuilt** macOS/Linux release archives (fast). `--HEAD` still builds from source.
+
+1. Re-auth if needed: `gh auth login -h github.com`
+2. Create the tap and push the formula:
 
 ```bash
-curl -sL https://github.com/nek0pi/celestine-md/archive/refs/tags/v0.1.0.tar.gz | shasum -a 256
-# paste into sha256 "..." in the formula
+gh repo create nek0pi/homebrew-celestine --public --clone
+cd homebrew-celestine
+mkdir -p Formula
+cp /path/to/celestine-md/packaging/homebrew/celestine-md.rb Formula/
+git add Formula/celestine-md.rb
+git commit -m "celestine-md 0.2.0"
+git push -u origin main
 ```
 
-4. Users install:
+3. Users install:
 
 ```bash
 brew tap nek0pi/celestine
 brew install celestine-md
-# or until the first tag SHA is set:
-brew install --HEAD nek0pi/celestine/celestine-md
 ```
+
+### Bumping the formula on each release
+
+After CI uploads the new archives, refresh checksums and `version` in the formula:
+
+```bash
+# macOS Apple Silicon / Intel / Linux x86_64 release tarballs
+curl -sL "https://github.com/nek0pi/celestine-md/releases/download/vX.Y.Z/celestine-macos-aarch64-vX.Y.Z.tar.gz" | shasum -a 256
+curl -sL "https://github.com/nek0pi/celestine-md/releases/download/vX.Y.Z/celestine-macos-x86_64-vX.Y.Z.tar.gz" | shasum -a 256
+curl -sL "https://github.com/nek0pi/celestine-md/releases/download/vX.Y.Z/celestine-linux-x86_64-vX.Y.Z.tar.gz" | shasum -a 256
+```
+
+Commit the updated `Formula/celestine-md.rb` in `homebrew-celestine`.
 
 Getting into **homebrew-core** is a separate PR review and usually wants notable usage — start with your tap.
 
@@ -82,12 +100,14 @@ Getting into **homebrew-core** is a separate PR review and usually wants notable
 
 1. Register on [aur.archlinux.org](https://aur.archlinux.org/)
 2. `git clone ssh://aur@aur.archlinux.org/celestine-md.git`
-3. Copy `packaging/aur/PKGBUILD`, set real `sha256sums`, run:
+3. Copy `packaging/aur/PKGBUILD`, bump `pkgver` / `sha256sums` if needed, run:
 
 ```bash
+# source tarball checksum (AUR builds from tag source)
+curl -sL "https://github.com/nek0pi/celestine-md/archive/refs/tags/v0.2.0.tar.gz" | sha256sum
 makepkg --printsrcinfo > .SRCINFO
 makepkg -si   # test locally
-git add PKGBUILD .SRCINFO && git commit -m "celestine-md 0.1.0-1" && git push
+git add PKGBUILD .SRCINFO && git commit -m "celestine-md 0.2.0-1" && git push
 ```
 
 Users: `yay -S celestine-md` / `paru -S celestine-md`.
@@ -100,8 +120,8 @@ Optional later: `celestine-md-bin` PKGBUILD that downloads the GitHub release bi
 
 | OS | Easiest path |
 |----|----------------|
-| **Linux** | Download `.tar.gz` → `./install.sh`, or AUR when published |
-| **macOS** | Download arch-matching `.tar.gz`, or `brew tap` when published |
+| **Linux** | `curl …/install-from-release.sh \| bash`, or AUR when published |
+| **macOS** | `brew tap nek0pi/celestine && brew install celestine-md` (after tap is public) |
 | **Windows** | Download `.zip`, run `celestine.exe` (SmartScreen may warn on first unsigned builds) |
 
 Code-sign / notarize for macOS and Authenticode for Windows are **not** included yet (needs Apple/Microsoft developer accounts + certificates).

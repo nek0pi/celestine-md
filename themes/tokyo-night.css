@@ -1,11 +1,11 @@
-/* CelestineMD theme: tokyo-night — deep indigo night city */
+/* CelestineMD theme: tokyo-night — deep indigo night city, cyan neon */
 :root {
   --background-primary: #16161e;
   --background-secondary: #1a1b26;
-  --background-modifier-border: #414868;
+  --background-modifier-border: #3b4261;
   --text-normal: #c0caf5;
   --text-muted: #565f89;
-  --text-accent: #bb9af7;
+  --text-accent: #7dcfff;
   --interactive-accent: #7aa2f7;
-  --selection: #292e42;
+  --selection: #283457;
 }

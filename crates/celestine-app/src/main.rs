@@ -6,10 +6,12 @@ mod graph_view;
 mod icons;
 mod keybinds;
 mod md_edit;
+mod md_table;
 mod media;
 mod outline_tree;
 mod preview;
 mod state;
+mod table_ui;
 mod theme_apply;
 mod update_check;
 

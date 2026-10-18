@@ -106,12 +106,19 @@ jobs:
               cp "assets/icon/celestine-${sz}.png" "$STAGE/share/icons/hicolor/${sz}x${sz}/apps/celestine.png"
             fi
           done
+          cp packaging/release-bundle-install.sh "$STAGE/install.sh"
+          chmod +x "$STAGE/install.sh"
           cat > "$STAGE/README.txt" <<EOF
           CelestineMD ${VER} (${{ matrix.artifact }})
           https://github.com/nek0pi/celestine-md
 
-          Run:  ./bin/celestine /path/to/vault
-          Themes live in share/celestine/themes (also searched under ~/.local/share/celestine/themes).
+          Quick start:
+            ./bin/celestine /path/to/vault
+
+          User install (binary + desktop + icons + themes → ~/.local):
+            ./install.sh
+
+          Themes also live under share/celestine/themes (and ~/.local/share/celestine/themes).
           EOF
           (
             cd dist

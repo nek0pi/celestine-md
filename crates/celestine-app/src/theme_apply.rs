@@ -45,6 +45,9 @@ pub struct ThemePalette {
     pub accent: Color32,
     pub text: Color32,
     pub muted: Color32,
+    pub border: Color32,
+    pub content_bg: Color32,
+    pub panel_bg: Color32,
     pub folder: [Color32; 10],
     pub heading: [Color32; 6],
 }
@@ -56,6 +59,9 @@ impl ThemePalette {
         let text_accent = color(t.text_accent);
         let text = color(t.text_normal);
         let muted = color(t.text_muted);
+        let border = color(t.background_modifier_border);
+        let content = content_bg(t);
+        let panel = panel_bg(t);
         let seed = theme_hue_seed(&t.name);
         let (ah, asat, aval) = rgb_to_hsv(accent);
         // Seed dominates so packs with similar accents still diverge.
@@ -112,6 +118,9 @@ impl ThemePalette {
             accent,
             text,
             muted,
+            border,
+            content_bg: content,
+            panel_bg: panel,
             folder,
             heading: [h1, h2, h3, h4, h5, h6],
         }
@@ -131,8 +140,9 @@ impl ThemePalette {
 fn theme_hue_seed(name: &str) -> f32 {
     match name {
         "obsidian-dark" | "obsidian-light" => 265.0,
-        "catppuccin" => 220.0,
-        "tokyo-night" => 235.0,
+        // Mauve vs cyan-blue — keep these packs from collapsing into the same night UI.
+        "catppuccin" => 280.0,
+        "tokyo-night" => 205.0,
         "gruvbox-dark" | "gruvbox-light" => 35.0,
         "nord" => 200.0,
         "solarized-dark" | "solarized-light" => 175.0,

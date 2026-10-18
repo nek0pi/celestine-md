@@ -1,11 +1,11 @@
-/* CelestineMD theme: catppuccin mocha — soft lavender dusk */
+/* CelestineMD theme: catppuccin mocha — soft mauve lavender dusk */
 :root {
   --background-primary: #1e1e2e;
   --background-secondary: #181825;
-  --background-modifier-border: #313244;
+  --background-modifier-border: #45475a;
   --text-normal: #cdd6f4;
-  --text-muted: #7f849c;
-  --text-accent: #cba6f7;
-  --interactive-accent: #89b4fa;
-  --selection: #45475a;
+  --text-muted: #6c7086;
+  --text-accent: #b4befe;
+  --interactive-accent: #cba6f7;
+  --selection: #585b70;
 }

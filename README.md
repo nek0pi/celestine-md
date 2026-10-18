@@ -95,40 +95,49 @@ Plugins · Canvas · Sync · Obsidian-style Live Preview WYSIWYG · arbitrary co
 
 ## Install
 
-### Prebuilt releases (Linux / macOS / Windows)
-
-Tagged releases on GitHub ship archives for **Linux x86_64**, **macOS** (Intel + Apple Silicon), and **Windows x86_64**:
-
-**[github.com/nek0pi/celestine-md/releases](https://github.com/nek0pi/celestine-md/releases)**
+### Linux (one-liner)
 
 ```bash
-# Linux / macOS example
-tar -xzf celestine-linux-x86_64-v0.2.0.tar.gz
-./celestine-linux-x86_64/install.sh          # → ~/.local/bin/celestine
+curl -fsSL https://raw.githubusercontent.com/nek0pi/celestine-md/main/packaging/install-from-release.sh | bash
 celestine ~/Notes
 ```
 
-Windows: unzip and run `celestine.exe` (first launch may show SmartScreen until binaries are signed).
+Installs the latest **x86_64** release into `~/.local` (binary, desktop entry, icons, themes). Ensure `~/.local/bin` is on your `PATH`.
 
-### Homebrew (tap — after first formula publish)
+### Homebrew (macOS / Linuxbrew)
 
 ```bash
 brew tap nek0pi/celestine
 brew install celestine-md
-# or from git HEAD:
+# or build from git HEAD:
 brew install --HEAD nek0pi/celestine/celestine-md
 ```
 
-Formula draft: [`packaging/homebrew/celestine-md.rb`](packaging/homebrew/celestine-md.rb). See [`docs/RELEASE.md`](docs/RELEASE.md).
+Formula: [`packaging/homebrew/celestine-md.rb`](packaging/homebrew/celestine-md.rb) (prebuilt release binaries). Tap setup: [`docs/RELEASE.md`](docs/RELEASE.md).
 
-### Arch Linux (AUR — after you publish the package)
+### Arch Linux (AUR)
 
 ```bash
 yay -S celestine-md
 # or: paru -S celestine-md
 ```
 
-PKGBUILD draft: [`packaging/aur/PKGBUILD`](packaging/aur/PKGBUILD).
+PKGBUILD: [`packaging/aur/PKGBUILD`](packaging/aur/PKGBUILD).
+
+### Prebuilt archives (Linux / macOS / Windows)
+
+Tagged releases ship **Linux x86_64**, **macOS** (Intel + Apple Silicon), and **Windows x86_64**:
+
+**[github.com/nek0pi/celestine-md/releases](https://github.com/nek0pi/celestine-md/releases)**
+
+```bash
+# Linux / macOS example
+tar -xzf celestine-linux-x86_64-v0.3.0.tar.gz
+./celestine-linux-x86_64/install.sh          # → ~/.local/bin/celestine
+celestine ~/Notes
+```
+
+Windows: unzip and run `celestine.exe` (first launch may show SmartScreen until binaries are signed).
 
 ### From source
 

@@ -10,7 +10,7 @@
 # Users:  yay -S celestine-md   OR   paru -S celestine-md
 
 pkgname=celestine-md
-pkgver=0.1.0
+pkgver=0.3.0
 pkgrel=1
 pkgdesc='Ultralight Obsidian-inspired Markdown notes (Rust / egui)'
 arch=('x86_64')
@@ -19,7 +19,7 @@ license=('MIT')
 depends=('libxkbcommon' 'libxcb' 'gtk3')
 makedepends=('cargo' 'clang' 'pkgconf')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP') # replace with real checksum before AUR push
+sha256sums=('SKIP') # filled after v0.3.0 tag is pushed
 options=('!lto')
 
 prepare() {
