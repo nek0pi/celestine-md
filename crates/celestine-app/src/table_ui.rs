@@ -44,8 +44,8 @@ impl TableStyle {
 
 /// Read-only table (preview). `rows[0]` is the header when non-empty.
 ///
-/// Click the table to select it (accent border); then Mod+C copies Markdown.
-/// Right-click for Copy as Markdown / TSV. Individual cells stay selectable.
+/// Click the table to select it (accent border); then Mod+C or the adjacent
+/// copy control copies Markdown. Individual cells stay selectable.
 pub fn show_readonly(ui: &mut Ui, rows: &[Vec<String>], style: TableStyle) {
     if rows.is_empty() {
         return;
@@ -61,7 +61,6 @@ pub fn show_readonly(ui: &mut Ui, rows: &[Vec<String>], style: TableStyle) {
         .collect();
 
     let markdown = md_table::rows_to_markdown(&grid);
-    let tsv = md_table::rows_to_tsv(&grid);
     let table_id = ui.make_persistent_id(("table_ro", md5ish(&markdown)));
 
     let cell_pad = Vec2::new(10.0, 6.0);
@@ -111,7 +110,7 @@ pub fn show_readonly(ui: &mut Ui, rows: &[Vec<String>], style: TableStyle) {
                                 .color(style.text)
                         };
                         // Selectable so a single cell can be copied; whole-table
-                        // copy uses the frame selection / context menu below.
+                        // copy uses the adjacent copy control.
                         child.add(Label::new(rt).selectable(true));
                         x += w;
                     }
@@ -122,16 +121,7 @@ pub fn show_readonly(ui: &mut Ui, rows: &[Vec<String>], style: TableStyle) {
             })
             .inner;
 
-        let _ = handle_table_selection(
-            ui,
-            table_id,
-            &response,
-            &markdown,
-            &tsv,
-            style,
-            false,
-            false,
-        );
+        handle_table_selection(ui, table_id, &response, &markdown, style);
     });
     ui.add_space(8.0);
 }
@@ -146,8 +136,8 @@ enum StructOp {
 
 /// Interactive table for edit mode.
 ///
-/// Cells use TextEdit (in-cell select/copy). Click the frame / use the copy
-/// control / right-click to copy the whole table as Markdown or TSV.
+/// Cells use TextEdit (in-cell select/copy). Whole-table copy/delete via the
+/// adjacent toolbar — no frame click layer over the grid.
 /// Pasting a whole table while a cell is focused is redirected (see
 /// [`TableEditOutcome::paste_table`]) so newlines aren't flattened away.
 pub fn show_editable(
@@ -167,7 +157,6 @@ pub fn show_editable(
     grid.extend(table.rows.iter().cloned());
 
     let markdown = md_table::serialize(table);
-    let tsv = md_table::rows_to_tsv(&grid);
     let table_id = id.with("table_sel");
     let n_cols = table.col_count();
     let n_grid_rows = grid.len();
@@ -213,8 +202,9 @@ pub fn show_editable(
             Stroke::new(1.0, style.border)
         };
 
-        // Background uses hover so cell TextEdits keep click/drag priority.
-        let frame_resp = Frame::new()
+        // Do not put a click Sense over the whole grid — it steals focus from
+        // cell TextEdits. Adjacent toolbar handles whole-table copy/delete.
+        Frame::new()
             .fill(style.content_bg)
             .stroke(stroke)
             .corner_radius(CornerRadius::same(2))
@@ -247,8 +237,6 @@ pub fn show_editable(
                         if cell_resp.changed() {
                             cell_changed = true;
                         }
-                        // Focusing a cell clears whole-table selection so Mod+C
-                        // copies the cell selection instead of the whole table.
                         if cell_resp.gained_focus() {
                             ui.memory_mut(|m| m.data.insert_temp(table_id, false));
                         }
@@ -257,23 +245,7 @@ pub fn show_editable(
                 }
 
                 paint_grid_lines(ui, rect, &widths, n_rows, style.border, row_h);
-                // Click empty chrome / right-click anywhere on the grid for select/copy.
-                ui.interact(rect, id.with("table_bg"), Sense::click())
-            })
-            .inner;
-
-        if handle_table_selection(
-            ui,
-            table_id,
-            &frame_resp,
-            &markdown,
-            &tsv,
-            style,
-            true,
-            true,
-        ) {
-            delete_table = true;
-        }
+            });
 
         ui.vertical(|ui| {
             ui.add_space((total_h - btn_w).max(0.0) * 0.5);
@@ -378,69 +350,26 @@ pub fn show_editable(
     }
 }
 
-/// Returns `true` when the user chose Delete table from the context menu.
+/// Preview-only: click to select, Mod+C / adjacent copy control.
 fn handle_table_selection(
     ui: &mut Ui,
     table_id: egui::Id,
     response: &egui::Response,
     markdown: &str,
-    tsv: &str,
     style: TableStyle,
-    editing_cells: bool,
-    allow_delete: bool,
-) -> bool {
+) {
     let mut selected = ui.memory(|m| m.data.get_temp::<bool>(table_id).unwrap_or(false));
-    let mut delete_clicked = false;
 
     if response.clicked() {
         selected = true;
         ui.memory_mut(|m| m.data.insert_temp(table_id, true));
     }
     if response.clicked_elsewhere() {
-        // Don't clear while the user is interacting with a cell TextEdit inside
-        // this table — those clicks are "elsewhere" relative to the frame Sense.
-        if !(editing_cells && ui.ctx().egui_wants_keyboard_input()) {
-            selected = false;
-            ui.memory_mut(|m| m.data.insert_temp(table_id, false));
-        }
+        selected = false;
+        ui.memory_mut(|m| m.data.insert_temp(table_id, false));
     }
 
-    response.context_menu(|ui| {
-        if ui
-            .button(RichText::new("Copy as Markdown").color(style.text))
-            .clicked()
-        {
-            ui.ctx().copy_text(markdown.to_string());
-            ui.close();
-        }
-        if ui
-            .button(RichText::new("Copy as TSV").color(style.text))
-            .clicked()
-        {
-            ui.ctx().copy_text(tsv.to_string());
-            ui.close();
-        }
-        if ui
-            .button(RichText::new("Copy as plain text").color(style.text))
-            .clicked()
-        {
-            ui.ctx().copy_text(tsv.replace('\t', " "));
-            ui.close();
-        }
-        if allow_delete {
-            ui.separator();
-            if ui
-                .button(RichText::new("Delete table").color(style.text))
-                .clicked()
-            {
-                delete_clicked = true;
-                ui.close();
-            }
-        }
-    });
-
-    // Hover affordance: copy control next to the table in preview.
-    if !editing_cells && (response.hovered() || selected) {
+    if response.hovered() || selected {
         if copy_button(ui, style).clicked() {
             ui.ctx().copy_text(markdown.to_string());
             selected = true;
@@ -448,8 +377,6 @@ fn handle_table_selection(
         }
     }
 
-    // Whole-table Mod+C when selected and no text field is eating keyboard input.
-    // (In edit mode, a focused cell TextEdit sets egui_wants_keyboard_input.)
     if selected
         && !ui.ctx().egui_wants_keyboard_input()
         && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::C))
@@ -458,14 +385,12 @@ fn handle_table_selection(
     }
 
     if selected {
-        response.clone().on_hover_text("Selected · Mod+C copies Markdown · right-click for more");
+        response.clone().on_hover_text("Selected · Mod+C copies Markdown");
     } else {
         response
             .clone()
-            .on_hover_text("Click to select · right-click to copy · cells are selectable");
+            .on_hover_text("Click to select · cells are selectable");
     }
-
-    delete_clicked
 }
 
 fn copy_button(ui: &mut Ui, style: TableStyle) -> egui::Response {
