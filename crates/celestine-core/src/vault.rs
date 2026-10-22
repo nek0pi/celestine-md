@@ -1,7 +1,7 @@
 use crate::graph::LinkGraph;
 use crate::index::{is_visible_path, VaultIndex};
 use crate::path::{canonical_note_target, checked_rel, resolve_vault_path};
-use crate::CoreError;
+use crate::{Canvas, CoreError};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -16,6 +16,7 @@ enum FsEntry {
     Directory,
     Note(FileStamp),
     Image(FileStamp),
+    Canvas(FileStamp),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -462,7 +463,15 @@ impl Vault {
 
     /// Image files under the vault (png/jpg/gif/webp/svg/bmp), for the sidebar tree.
     pub fn list_image_rel_paths(&self) -> Vec<String> {
-        let image_exts = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"];
+        self.list_rel_paths_with_ext(&IMAGE_EXTS)
+    }
+
+    /// `.canvas` files under the vault.
+    pub fn list_canvas_rel_paths(&self) -> Vec<String> {
+        self.list_rel_paths_with_ext(&["canvas"])
+    }
+
+    fn list_rel_paths_with_ext(&self, exts: &[&str]) -> Vec<String> {
         let mut v = Vec::new();
         for entry in WalkDir::new(&self.root)
             .into_iter()
@@ -474,7 +483,7 @@ impl Vault {
             let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
                 continue;
             };
-            if !image_exts.iter().any(|x| x.eq_ignore_ascii_case(ext)) {
+            if !exts.iter().any(|x| x.eq_ignore_ascii_case(ext)) {
                 continue;
             }
             let Ok(rel) = checked_rel(&self.root, path) else {
@@ -490,10 +499,41 @@ impl Vault {
         v
     }
 
-    /// Notes + images for the files sidebar.
+    /// Create an empty `.canvas` file (no-op if it already exists).
+    pub fn create_canvas(&mut self, rel: &str) -> Result<(), CoreError> {
+        let path = resolve_vault_path(&self.root, Path::new(rel))?;
+        if std::fs::symlink_metadata(&path).is_ok() {
+            return Ok(());
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, "{\"nodes\":[],\"edges\":[]}\n")?;
+        Ok(())
+    }
+
+    pub fn read_canvas(&self, rel: &str) -> Result<Canvas, CoreError> {
+        let path = resolve_vault_path(&self.root, Path::new(rel))?;
+        let text = std::fs::read_to_string(path)?;
+        Canvas::load(&text).map_err(|e| {
+            CoreError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        })
+    }
+
+    pub fn write_canvas(&mut self, rel: &str, canvas: &Canvas) -> Result<(), CoreError> {
+        let path = resolve_vault_path(&self.root, Path::new(rel))?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, canvas.to_pretty_string())?;
+        Ok(())
+    }
+
+    /// Notes, images and canvases for the files sidebar.
     pub fn list_sidebar_rel_paths(&self) -> Vec<String> {
         let mut v = self.list_md_rel_paths();
         v.extend(self.list_image_rel_paths());
+        v.extend(self.list_canvas_rel_paths());
         v.sort();
         v.dedup();
         v
@@ -561,7 +601,20 @@ impl Vault {
             }
         }
         self.rebuild_graph();
+        self.rewrite_canvas_refs(&old_rel, &new_rel, is_dir);
         Ok(())
+    }
+
+    /// Keep canvas file cards pointing at a moved note, image, or folder.
+    fn rewrite_canvas_refs(&mut self, old_rel: &str, new_rel: &str, is_dir: bool) {
+        for rel in self.list_canvas_rel_paths() {
+            let Ok(mut canvas) = self.read_canvas(&rel) else {
+                continue;
+            };
+            if canvas.rename_file_refs(old_rel, new_rel, is_dir) {
+                let _ = self.write_canvas(&rel, &canvas);
+            }
+        }
     }
 
     /// Delete a note file, or an empty folder.
@@ -651,14 +704,19 @@ fn fs_entry(path: &Path) -> std::io::Result<Option<FsEntry>> {
     if extension.eq_ignore_ascii_case("md") {
         return Ok(Some(FsEntry::Note(stamp)));
     }
-    if ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"]
+    if IMAGE_EXTS
         .iter()
         .any(|ext| extension.eq_ignore_ascii_case(ext))
     {
         return Ok(Some(FsEntry::Image(stamp)));
     }
+    if extension.eq_ignore_ascii_case("canvas") {
+        return Ok(Some(FsEntry::Canvas(stamp)));
+    }
     Ok(None)
 }
+
+const IMAGE_EXTS: [&str; 7] = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"];
 
 /// Do both paths name the same on-disk entry (e.g. differ only by case)?
 fn same_entry(a: &Path, b: &Path) -> bool {
@@ -1367,6 +1425,24 @@ mod tests {
             .collect();
         assert!(on_disk.contains(&"Note.md".to_string()), "{on_disk:?}");
         assert!(!on_disk.contains(&"note.md".to_string()), "{on_disk:?}");
+    }
+
+    #[test]
+    fn canvases_are_listed_and_follow_renamed_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        write_rel(dir.path(), "Notes/Idea.md", "# Idea\n");
+        let mut v = Vault::open(dir.path()).unwrap();
+        v.create_canvas("Board.canvas").unwrap();
+        let mut canvas = v.read_canvas("Board.canvas").unwrap();
+        canvas
+            .nodes
+            .push(crate::canvas::CanvasNode::new_file(0.0, 0.0, 300.0, 200.0, "Notes/Idea.md"));
+        v.write_canvas("Board.canvas", &canvas).unwrap();
+        assert!(v.list_sidebar_rel_paths().contains(&"Board.canvas".to_string()));
+
+        v.rename_entry("Notes", "Archive").unwrap();
+        let canvas = v.read_canvas("Board.canvas").unwrap();
+        assert_eq!(canvas.nodes[0].file.as_deref(), Some("Archive/Idea.md"));
     }
 
     #[test]

@@ -10,6 +10,7 @@ pub enum Command {
     Graph,
     CloseTab,
     NewNote,
+    NewCanvas,
     Save,
     TogglePreview,
     Find,
@@ -51,6 +52,7 @@ impl Command {
             Command::Graph => "Graph view",
             Command::CloseTab => "Close tab",
             Command::NewNote => "New note",
+            Command::NewCanvas => "New canvas",
             Command::Save => "Save",
             Command::TogglePreview => "Toggle edit/preview",
             Command::Find => "Find in note",
@@ -92,6 +94,7 @@ impl Command {
             Command::Graph => "graph",
             Command::CloseTab => "close_tab",
             Command::NewNote => "new_note",
+            Command::NewCanvas => "new_canvas",
             Command::Save => "save",
             Command::TogglePreview => "toggle_preview",
             Command::Find => "find",
@@ -158,6 +161,7 @@ impl Keymap {
         k.set(Command::Graph, "Mod+G");
         k.set(Command::CloseTab, "Mod+W");
         k.set(Command::NewNote, "Mod+N");
+        k.set(Command::NewCanvas, "Mod+Shift+C");
         k.set(Command::Save, "Mod+S");
         k.set(Command::TogglePreview, "Mod+E");
         k.set(Command::Find, "Mod+F");
@@ -347,6 +351,7 @@ fn command_from_id(id: &str) -> Option<Command> {
         "graph" => Command::Graph,
         "close_tab" => Command::CloseTab,
         "new_note" => Command::NewNote,
+        "new_canvas" => Command::NewCanvas,
         "save" => Command::Save,
         "toggle_preview" => Command::TogglePreview,
         "find" => Command::Find,

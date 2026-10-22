@@ -1,4 +1,6 @@
 mod app;
+mod canvas_ink;
+mod canvas_view;
 mod emoji_util;
 mod file_tree;
 mod fonts;

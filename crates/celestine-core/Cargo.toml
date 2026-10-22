@@ -7,6 +7,7 @@ description = "Vault, markdown parse, link index, and graph for CelestineMD"
 
 [dependencies]
 serde = { workspace = true }
+serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 walkdir = { workspace = true }

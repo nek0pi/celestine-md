@@ -1,5 +1,6 @@
 //! CelestineMD core: vault indexing, wikilink parsing, resolution, and graph.
 
+pub mod canvas;
 mod error;
 mod graph;
 mod index;
@@ -8,6 +9,7 @@ mod parse;
 mod resolve;
 mod vault;
 
+pub use canvas::Canvas;
 pub use error::CoreError;
 pub use graph::{LinkGraph, NodeId};
 pub use index::{Heading, NoteId, NoteMeta, VaultIndex};

@@ -1,4 +1,4 @@
-use egui::{Color32, RichText, Ui};
+use egui::{Color32, RichText, Sense, Stroke, Ui};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
@@ -97,6 +97,16 @@ pub struct TreeOutcome {
     /// Rename field committed (Enter) → new basename only.
     pub rename_commit: Option<String>,
     pub rename_cancel: bool,
+    /// Drag-and-drop move: source item → destination folder (`None` = vault root).
+    pub move_request: Option<TreeMoveRequest>,
+}
+
+/// Request to move a tree entry into another folder (or vault root).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeMoveRequest {
+    pub source: TreeNavItem,
+    /// Destination parent folder (`None` / empty = vault root).
+    pub dest_folder: Option<String>,
 }
 
 /// Inline rename editor for a tree row.
@@ -112,6 +122,59 @@ pub struct RenameEdit {
 pub enum TreeNavItem {
     Dir(String),
     File(String),
+}
+
+impl TreeNavItem {
+    pub fn rel(&self) -> &str {
+        match self {
+            Self::Dir(p) | Self::File(p) => p,
+        }
+    }
+
+    pub fn is_dir(&self) -> bool {
+        matches!(self, Self::Dir(_))
+    }
+}
+
+/// Resolve a drag-and-drop move into `(old_rel, new_rel, is_dir)`.
+/// Returns `None` when the move is a no-op or would nest a folder under itself.
+pub fn resolve_tree_move(
+    source: &TreeNavItem,
+    dest_folder: Option<&str>,
+) -> Option<(String, String, bool)> {
+    let old_rel = source.rel();
+    let is_dir = source.is_dir();
+    let name = Path::new(old_rel).file_name()?.to_str()?;
+    let dest = dest_folder.unwrap_or("").trim_matches('/');
+    if is_dir {
+        if dest == old_rel {
+            return None;
+        }
+        if !dest.is_empty() && dest.starts_with(&format!("{old_rel}/")) {
+            return None;
+        }
+    }
+    let new_rel = if dest.is_empty() {
+        name.to_string()
+    } else {
+        format!("{dest}/{name}")
+    };
+    if new_rel == old_rel {
+        return None;
+    }
+    Some((old_rel.to_string(), new_rel, is_dir))
+}
+
+fn parent_folder_of(rel: &str) -> Option<String> {
+    Path::new(rel)
+        .parent()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .filter(|p| !p.is_empty() && p != ".")
+}
+
+/// Whether `source` can be dropped into `dest_folder` (`None` = vault root).
+fn can_drop_into(source: &TreeNavItem, dest_folder: Option<&str>) -> bool {
+    resolve_tree_move(source, dest_folder).is_some()
 }
 
 /// Visible rows in depth-first order (respects `expanded`).
@@ -197,6 +260,7 @@ pub fn show_tree(
         focus_item: None,
         rename_commit: None,
         rename_cancel: false,
+        move_request: None,
     };
     show_dir(
         ui,
@@ -214,7 +278,64 @@ pub fn show_tree(
         rename,
         &mut outcome,
     );
+    // Empty space below the tree (and leftover scroll height) → drop to vault root.
+    let leftover = ui.available_height().max(24.0);
+    let (root_rect, root_resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), leftover), Sense::hover());
+    if drop_hover_active(&root_resp, None, rename.is_some()) {
+        paint_drop_hover(ui, root_rect, palette);
+    }
+    accept_drop(&root_resp, None, rename.is_some(), &mut outcome);
     outcome
+}
+
+/// True when a compatible payload is hovering this drop target.
+fn drop_hover_active(
+    resp: &egui::Response,
+    dest_folder: Option<&str>,
+    renaming: bool,
+) -> bool {
+    if renaming {
+        return false;
+    }
+    resp.dnd_hover_payload::<TreeNavItem>()
+        .is_some_and(|payload| can_drop_into(&payload, dest_folder))
+}
+
+/// Accept a release onto `dest_folder` (`None` = vault root).
+fn accept_drop(
+    resp: &egui::Response,
+    dest_folder: Option<&str>,
+    renaming: bool,
+    outcome: &mut TreeOutcome,
+) {
+    if renaming || outcome.move_request.is_some() {
+        return;
+    }
+    if let Some(payload) = resp.dnd_release_payload::<TreeNavItem>() {
+        if can_drop_into(&payload, dest_folder) {
+            outcome.move_request = Some(TreeMoveRequest {
+                source: (*payload).clone(),
+                dest_folder: dest_folder
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string()),
+            });
+        }
+    }
+}
+
+fn paint_drop_hover(ui: &Ui, row_rect: egui::Rect, palette: &crate::theme_apply::ThemePalette) {
+    ui.painter().rect_filled(
+        row_rect,
+        2.0,
+        palette.accent.gamma_multiply(0.16),
+    );
+    ui.painter().rect_stroke(
+        row_rect,
+        2.0,
+        Stroke::new(1.5, palette.accent),
+        egui::StrokeKind::Inside,
+    );
 }
 
 fn active_ancestors(active_rel: Option<&str>) -> HashSet<String> {
@@ -290,11 +411,16 @@ fn show_dir(
 
         let row_h = TREE_FONT + 6.0;
         let row_w = ui.available_width();
-        let (row_rect, resp) = ui.allocate_exact_size(
-            egui::vec2(row_w, row_h),
-            egui::Sense::click(),
-        );
-        if is_cursor && tree_focused && !is_renaming {
+        let sense = if is_renaming {
+            Sense::hover()
+        } else {
+            Sense::click_and_drag()
+        };
+        let (row_rect, resp) = ui.allocate_exact_size(egui::vec2(row_w, row_h), sense);
+        let drop_hover = drop_hover_active(&resp, Some(&path), is_renaming);
+        if drop_hover {
+            paint_drop_hover(ui, row_rect, palette);
+        } else if is_cursor && tree_focused && !is_renaming {
             ui.painter().rect_filled(
                 row_rect,
                 2.0,
@@ -339,6 +465,15 @@ fn show_dir(
                 }
             });
         });
+
+        if !is_renaming {
+            resp.dnd_set_drag_payload(TreeNavItem::Dir(path.clone()));
+            // Auto-expand while hovering a valid drop so nested targets become reachable.
+            if drop_hover {
+                expanded.insert(path.clone());
+            }
+            accept_drop(&resp, Some(&path), false, outcome);
+        }
 
         if let Some(_r) = rename_resp {
             if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -441,11 +576,18 @@ fn show_dir(
         }
         let row_h = TREE_FONT + 6.0;
         let row_w = ui.available_width();
-        let (row_rect, resp) = ui.allocate_exact_size(
-            egui::vec2(row_w, row_h),
-            egui::Sense::click(),
-        );
-        if is_cursor && tree_focused && !is_renaming {
+        let sense = if is_renaming {
+            Sense::hover()
+        } else {
+            Sense::click_and_drag()
+        };
+        let (row_rect, resp) = ui.allocate_exact_size(egui::vec2(row_w, row_h), sense);
+        // Dropping onto a file moves into that file's parent folder.
+        let file_drop_dest = parent_folder_of(rel);
+        let drop_hover = drop_hover_active(&resp, file_drop_dest.as_deref(), is_renaming);
+        if drop_hover {
+            paint_drop_hover(ui, row_rect, palette);
+        } else if is_cursor && tree_focused && !is_renaming {
             ui.painter().rect_filled(
                 row_rect,
                 2.0,
@@ -467,6 +609,8 @@ fn show_dir(
                 ui.add_space(TREE_ICON * 0.85 + 4.0);
                 let file_icon = if crate::media::is_image_rel(rel) {
                     "image"
+                } else if rel.to_lowercase().ends_with(".canvas") {
+                    "canvas"
                 } else {
                     "file-text"
                 };
@@ -493,6 +637,11 @@ fn show_dir(
                 }
             });
         });
+
+        if !is_renaming {
+            resp.dnd_set_drag_payload(TreeNavItem::File(rel.clone()));
+            accept_drop(&resp, file_drop_dest.as_deref(), false, outcome);
+        }
 
         if let Some(_r) = rename_resp {
             if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -548,6 +697,45 @@ pub fn save_folder_icons(vault: &celestine_core::Vault, icons: &HashMap<String, 
         Err(_) => return,
     };
     let _ = vault.write_metadata("folder-icons.toml", &body);
+}
+
+#[cfg(test)]
+mod tree_move_tests {
+    use super::*;
+
+    #[test]
+    fn move_file_into_folder() {
+        let src = TreeNavItem::File("Note.md".into());
+        let (old, new, is_dir) = resolve_tree_move(&src, Some("Projects")).unwrap();
+        assert_eq!(old, "Note.md");
+        assert_eq!(new, "Projects/Note.md");
+        assert!(!is_dir);
+    }
+
+    #[test]
+    fn move_file_to_vault_root() {
+        let src = TreeNavItem::File("Projects/Note.md".into());
+        let (old, new, _) = resolve_tree_move(&src, None).unwrap();
+        assert_eq!(old, "Projects/Note.md");
+        assert_eq!(new, "Note.md");
+    }
+
+    #[test]
+    fn same_parent_is_noop() {
+        let src = TreeNavItem::File("Projects/Note.md".into());
+        assert!(resolve_tree_move(&src, Some("Projects")).is_none());
+    }
+
+    #[test]
+    fn cannot_move_folder_into_itself_or_descendant() {
+        let src = TreeNavItem::Dir("Projects".into());
+        assert!(resolve_tree_move(&src, Some("Projects")).is_none());
+        assert!(resolve_tree_move(&src, Some("Projects/Nested")).is_none());
+        let (old, new, is_dir) = resolve_tree_move(&src, Some("Archive")).unwrap();
+        assert_eq!(old, "Projects");
+        assert_eq!(new, "Archive/Projects");
+        assert!(is_dir);
+    }
 }
 
 #[cfg(test)]

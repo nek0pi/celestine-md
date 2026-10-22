@@ -87,9 +87,10 @@ Most note apps either ship Electron bloat or lock you into a proprietary store.
 - **`terminal`** theme follows [Omarchy](https://omarchy.org) `colors.toml` when present
 - Remappable TOML keybindings — Obsidian + Omarchy-friendly profiles
 - Color emoji via system fonts
+- **Canvas** boards (`.canvas`, [JSON Canvas](https://jsoncanvas.org)): nib-pen ink, text / note / image cards, arrows between anything, pixel dot grid — see [docs/INSPIRATION.md](docs/INSPIRATION.md#canvas)
 
 ### Deliberately skipped (for now)
-Plugins · Canvas · Sync · Obsidian-style Live Preview WYSIWYG · arbitrary community theme engines
+Plugins · Sync · Obsidian-style Live Preview WYSIWYG · arbitrary community theme engines
 
 ---
 

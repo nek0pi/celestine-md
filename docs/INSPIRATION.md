@@ -14,7 +14,8 @@ Not affiliated with Obsidian or Dynalist Inc.
 | Wikilinks / backlinks / graph | First-class: `[[links]]`, embeds, outline, backlinks pane, force graph |
 | Keyboard-first | Shortcuts on chrome + remappable TOML profiles; file-tree focus mode |
 | Themes | CSS custom-property packs → egui tokens (not Electron theme engines) |
-| Plugins / Sync / Canvas | Out of scope by design for now |
+| Spatial boards | Celestine canvas: `.canvas` files in the open [JSON Canvas](https://jsoncanvas.org) format, plus Celestine's own ink extension |
+| Plugins / Sync | Out of scope by design for now |
 
 Opening a folder that also contains `.obsidian/` is fine: Celestine reads the Markdown, not Obsidian’s app data, plugins, or proprietary formats.
 
@@ -37,6 +38,19 @@ Opening a folder that also contains `.obsidian/` is fine: Celestine reads the Ma
 - **Outline** + **backlinks** on the right; reveal active note in tree
 - **Graph** view with folder-tinted clusters
 - Sidebars toggle independently; nav back / forward history
+
+### Canvas
+A `.canvas` file opens as a pan/zoom board drawn in Celestine's own TUI/pixel style: a pixel dot grid, sharp 1px cards with `┌─ title ─┐` frame titles, hard drop shadows, and orthogonal arrows with chunky heads.
+
+- **Tools** (toolbar or keys): `V` select · `P` ink · `T` text · `N` note · `I` image · `A` arrow · `E` erase; `Mod+Shift+C` makes a new canvas
+- **Ink**: a nib-pen brush — strokes are smoothed, thin out when drawn fast, and taper at both ends; colour swatches follow the theme
+- **Text cards**: one monospace font, edited in place (double-click)
+- **Note cards**: drag a note from the file tree, or create one in place (`N` / right-click → *new note here…*) choosing its folder and name; the card shows a live preview, double-click opens the note
+- **Images**: drag from the tree, pick with `I`, drop files from the OS, or paste with `Mod+V` (screenshots, copied images, or files copied in a file manager); outside images are copied into `attachments/` beside the canvas. Pasted plain text becomes a text card
+- **Arrows** connect any two objects, including ink drawings; double-click an arrow to label it
+- Undo/redo `Mod+Z` / `Mod+Shift+Z`; scroll pans, `Ctrl`+scroll or pinch zooms
+
+**File format.** Cards and arrows are standard JSON Canvas `nodes` / `edges`, so other JSON Canvas tools can read them. Ink lives under a top-level `"celestine"` key (`drawings`, plus `edges` for arrows that touch a drawing), which other readers ignore; unknown fields are kept on save. Renaming or moving a note or image rewrites the file paths inside canvases.
 
 ### Themes
 Built-in CSS packs (distinct folder/heading palettes per pack):
@@ -86,7 +100,6 @@ assets/                   icon, fonts (outline emoji fallbacks unused when syste
 Still out of scope unless explicitly designed later:
 
 - Plugin host / community plugin APIs  
-- Canvas  
 - Cloud sync  
 - Full Live Preview WYSIWYG as Obsidian does it  
 - Loading arbitrary community `theme.css` engines / snippets ecosystems  

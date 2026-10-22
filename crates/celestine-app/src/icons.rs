@@ -43,6 +43,7 @@ fn path(name: &str) -> &'static str {
         "code" => "M16 18l6-6-6-6 M8 6l-6 6 6 6",
         "image" => "M3 3h18v18H3z M7 9A2 2 0 1 0 11 9A2 2 0 1 0 7 9Z M21 15l-3-3L6 21",
         "film" => "M3 3h18v18H3z M7 3v18 M17 3v18 M3 12h18",
+        "canvas" => "M2 3h8v6H2z M14 15h8v6h-8z M6 9v6h8",
         "music" => "M9 18V5l12-2v13 M6 16h6v6H6z M15 13h6v6h-6z",
         "archive" => "M2 3h20v5H2z M4 8v13h16V8 M10 12h4",
         "house" => "M3 21V10l9-7 9 7v11h-6v-8H9v8H3z",

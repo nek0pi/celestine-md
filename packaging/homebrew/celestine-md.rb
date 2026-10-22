@@ -56,7 +56,8 @@ class CelestineMd < Formula
 
   def caveats
     <<~EOS
-      Themes ship under #{pkgshare}/themes
+      Builtin themes are embedded in the binary; optional overrides live under
+        #{pkgshare}/themes
       Optional: copy a keybinding profile to ~/.config/celestine/keybindings.toml
       Launch: celestine ~/Notes
     EOS

@@ -1,3 +1,4 @@
+use crate::canvas_view::{BoardEnv, CanvasBoard};
 use crate::file_tree;
 use crate::graph_view::GraphState;
 use crate::keybinds::{ensure_user_config, Command, Keymap};
@@ -44,6 +45,7 @@ enum FocusPane {
 enum TabKind {
     Note,
     Image,
+    Canvas,
 }
 
 struct OpenTab {
@@ -58,6 +60,7 @@ struct OpenTab {
     /// Prefer this char offset (find / vault search hit) over line/heading.
     scroll_to_char: Option<usize>,
     editor_text_id: egui::Id,
+    canvas: Option<Box<CanvasBoard>>,
 }
 
 /// Brief highlight after jumping to a find / search hit.
@@ -319,9 +322,75 @@ impl CelestineApp {
     fn open_path(&mut self, rel: &str, push_nav: bool) {
         if crate::media::is_image_rel(rel) {
             self.open_image(rel, push_nav);
+        } else if is_canvas_rel(rel) {
+            self.open_canvas(rel, push_nav);
         } else {
             self.open_note(rel, push_nav);
         }
+    }
+
+    /// Open (creating if missing) a `.canvas` board in its own tab.
+    fn open_canvas(&mut self, rel: &str, push_nav: bool) {
+        let Some(vault) = self.vault.as_mut() else {
+            return;
+        };
+        if let Err(e) = vault.create_canvas(rel) {
+            self.status = format!("create failed: {e}");
+            return;
+        }
+        let rel = match vault.abs_path(rel).and_then(|path| vault.rel_of(&path)) {
+            Ok(rel) => rel,
+            Err(e) => {
+                self.status = format!("open failed: {e}");
+                return;
+            }
+        };
+        if push_nav {
+            if let Some(cur) = self.tabs.get(self.active_tab) {
+                self.nav_back.push(cur.rel.clone());
+                self.nav_forward.clear();
+            }
+        }
+        self.former_tab = self.active_tab;
+        if let Some(i) = self.tabs.iter().position(|t| t.rel == rel) {
+            self.active_tab = i;
+            self.touch_recent_note(&rel);
+            return;
+        }
+        let doc = match vault.read_canvas(&rel) {
+            Ok(doc) => doc,
+            Err(e) => {
+                self.status = format!("canvas {rel} is not valid JSON Canvas: {e}");
+                return;
+            }
+        };
+        self.tabs.push(OpenTab {
+            rel: rel.clone(),
+            kind: TabKind::Canvas,
+            buffer: String::new(),
+            dirty: false,
+            preview_mode: false,
+            scroll_to_line: None,
+            scroll_to_heading: None,
+            scroll_to_char: None,
+            editor_text_id: egui::Id::new(("celestine-canvas", rel.clone())),
+            canvas: Some(Box::new(CanvasBoard::new(doc))),
+        });
+        self.active_tab = self.tabs.len() - 1;
+        self.show_graph = false;
+        self.focus = FocusPane::Editor;
+        self.editor_focus_pending = false;
+        self.status = format!("canvas {rel}");
+        self.touch_recent_note(&rel);
+    }
+
+    fn active_canvas(&mut self) -> Option<&mut CanvasBoard> {
+        if self.show_graph {
+            return None;
+        }
+        self.tabs
+            .get_mut(self.active_tab)
+            .and_then(|t| t.canvas.as_deref_mut())
     }
 
     fn open_image(&mut self, rel: &str, push_nav: bool) {
@@ -368,6 +437,7 @@ impl CelestineApp {
             scroll_to_heading: None,
             scroll_to_char: None,
             editor_text_id: egui::Id::new(("celestine-image", rel.to_string())),
+            canvas: None,
         });
         self.active_tab = self.tabs.len() - 1;
         self.show_graph = false;
@@ -436,6 +506,7 @@ impl CelestineApp {
             scroll_to_heading: None,
             scroll_to_char: None,
             editor_text_id: egui::Id::new(("celestine-editor", rel.to_string())),
+            canvas: None,
         });
         self.active_tab = self.tabs.len() - 1;
         self.show_graph = false;
@@ -480,6 +551,18 @@ impl CelestineApp {
             return;
         }
         let rel = tab.rel.clone();
+        if let Some(board) = tab.canvas.as_deref() {
+            match vault.write_canvas(&rel, &board.doc) {
+                Ok(()) => {
+                    tab.dirty = false;
+                    if announce {
+                        self.status = format!("saved {rel}");
+                    }
+                }
+                Err(e) => self.status = format!("save error: {e}"),
+            }
+            return;
+        }
         let buffer = tab.buffer.clone();
         match vault.write_note(&rel, &buffer) {
             Ok(()) => {
@@ -509,7 +592,7 @@ impl CelestineApp {
             .tabs
             .iter()
             .enumerate()
-            .filter(|(_, t)| t.dirty && t.kind == TabKind::Note)
+            .filter(|(_, t)| t.dirty && t.kind != TabKind::Image)
             .map(|(i, _)| i)
             .collect();
         for i in dirty {
@@ -647,6 +730,19 @@ impl CelestineApp {
                     self.focus = FocusPane::Editor;
                 }
             }
+            Command::NewCanvas => {
+                if self.vault.is_some() {
+                    let folder = self.tree_create_parent();
+                    let name = format!("Untitled {}.canvas", chrono_lite_stamp());
+                    let rel = if folder.is_empty() {
+                        name
+                    } else {
+                        format!("{folder}/{name}")
+                    };
+                    self.expand_ancestors(&rel);
+                    self.open_canvas(&rel, true);
+                }
+            }
             Command::Save => self.save_active(),
             Command::TogglePreview => self.toggle_preview_mode(),
             Command::Quit => {
@@ -658,6 +754,9 @@ impl CelestineApp {
                     self.tree_rename = None;
                 } else if self.overlay != Overlay::None {
                     self.overlay = Overlay::None;
+                } else if self.focus == FocusPane::Editor
+                    && self.active_canvas().is_some_and(|b| b.escape())
+                {
                 } else if self.focus == FocusPane::Files {
                     self.focus_editor();
                 } else if self.show_graph {
@@ -707,7 +806,15 @@ impl CelestineApp {
             }
             Command::Rename => self.begin_rename_from_command(),
             Command::NewFolder => self.create_folder_here(),
-            Command::DeleteItem => self.delete_tree_selection(),
+            Command::DeleteItem => {
+                if self.focus == FocusPane::Editor
+                    && self.active_canvas().is_some_and(|b| b.delete_selection())
+                {
+                    self.mark_dirty(self.active_tab);
+                } else {
+                    self.delete_tree_selection();
+                }
+            }
             Command::ToggleLeftSidebar => self.toggle_left_sidebar(),
             Command::ToggleRightSidebar => self.toggle_right_sidebar(),
             Command::NavBack => self.nav_go_back(),
@@ -748,6 +855,10 @@ impl CelestineApp {
         };
         if t.kind == TabKind::Image {
             self.status = "image viewer (read-only)".into();
+            return;
+        }
+        if t.kind == TabKind::Canvas {
+            self.status = "canvas has no preview mode".into();
             return;
         }
         t.preview_mode = !t.preview_mode;
@@ -1008,6 +1119,32 @@ impl CelestineApp {
         }
     }
 
+    fn commit_tree_move(&mut self, request: file_tree::TreeMoveRequest) {
+        let Some((old_rel, new_rel, is_dir)) =
+            file_tree::resolve_tree_move(&request.source, request.dest_folder.as_deref())
+        else {
+            return;
+        };
+        let Some(vault) = self.vault.as_mut() else {
+            return;
+        };
+        match vault.rename_entry(&old_rel, &new_rel) {
+            Ok(()) => {
+                self.image_resolver.clear();
+                self.image_rels = None;
+                self.remap_after_rename(&old_rel, &new_rel, is_dir);
+                if let Some(parent) = Path::new(&new_rel).parent() {
+                    let p = parent.to_string_lossy().replace('\\', "/");
+                    if !p.is_empty() && p != "." {
+                        self.tree_expanded.insert(p);
+                    }
+                }
+                self.status = format!("moved → {new_rel}");
+            }
+            Err(e) => self.status = format!("move failed: {e}"),
+        }
+    }
+
     fn remap_after_rename(&mut self, old_rel: &str, new_rel: &str, is_dir: bool) {
         let remap = |path: &str| -> String {
             if path == old_rel {
@@ -1026,6 +1163,10 @@ impl CelestineApp {
 
         for tab in &mut self.tabs {
             tab.rel = remap(&tab.rel);
+            // The vault rewrote canvases on disk; keep open boards in step.
+            if let Some(board) = tab.canvas.as_deref_mut() {
+                board.doc.rename_file_refs(old_rel, new_rel, is_dir);
+            }
         }
         for p in &mut self.nav_back {
             *p = remap(p);
@@ -1202,6 +1343,13 @@ fn keep_file_extension(old_rel: &str, draft: String) -> String {
     } else {
         format!("{draft}.{old_ext}")
     }
+}
+
+fn is_canvas_rel(rel: &str) -> bool {
+    Path::new(rel)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("canvas"))
 }
 
 fn chrono_lite_stamp() -> String {
@@ -1478,11 +1626,15 @@ impl eframe::App for CelestineApp {
         }
 
         // Footer cheat strip
+        let canvas_hint = self.active_canvas().map(|b| b.tool_hint());
         egui::Panel::bottom("foot").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(&self.status).monospace().color(muted));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let strip = match self.focus {
+                        FocusPane::Editor if canvas_hint.is_some() => {
+                            canvas_hint.clone().unwrap_or_default()
+                        }
                         FocusPane::Files => format!(
                             "files · ↑↓ ←→ · Enter open · {} editor",
                             self.keymap.display_chord(Command::FocusFiles)
@@ -1527,7 +1679,7 @@ impl eframe::App for CelestineApp {
                         });
                     });
                     ui.label(
-                        RichText::new("click expand · dbl-click rename · F2")
+                        RichText::new("drag move · click expand · dbl-click rename · F2")
                             .size(10.0)
                             .color(muted.gamma_multiply(0.75)),
                     );
@@ -1586,6 +1738,9 @@ impl eframe::App for CelestineApp {
                         if let Some(draft) = outcome.rename_commit {
                             self.commit_tree_rename(draft);
                         }
+                        if let Some(request) = outcome.move_request {
+                            self.commit_tree_move(request);
+                        }
                         if let Some(rel) = outcome.open_rel {
                             self.expand_ancestors(&rel);
                             self.open_path(&rel, true);
@@ -1635,6 +1790,11 @@ impl eframe::App for CelestineApp {
                         if tab.kind == TabKind::Image {
                             ui.label(
                                 RichText::new("(image — no outline)")
+                                    .color(muted),
+                            );
+                        } else if tab.kind == TabKind::Canvas {
+                            ui.label(
+                                RichText::new("(canvas — no outline)")
                                     .color(muted),
                             );
                         } else {
@@ -1815,6 +1975,52 @@ impl eframe::App for CelestineApp {
                                     });
                                 }
                             });
+                    }
+                } else if tab_kind == TabKind::Canvas {
+                    self.editor_focus_pending = false;
+                    let dirty = self.tabs[tab_idx].dirty;
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("── {rel} ──")).monospace().color(accent));
+                        ui.label(
+                            RichText::new(if dirty { "CANVAS ·" } else { "CANVAS" })
+                                .monospace()
+                                .color(muted),
+                        );
+                    });
+                    let keys_enabled =
+                        self.overlay == Overlay::None && self.focus == FocusPane::Editor;
+                    let outcome = match (self.vault.as_mut(), self.tabs[tab_idx].canvas.as_deref_mut()) {
+                        (Some(vault), Some(board)) => {
+                            if self.image_rels.is_none() {
+                                self.image_rels = Some(vault.list_image_rel_paths());
+                            }
+                            let mut env = BoardEnv {
+                                vault,
+                                canvas_rel: &rel,
+                                palette: &palette,
+                                image_rels: self.image_rels.as_deref().unwrap_or(&[]),
+                                image_resolver: &mut self.image_resolver,
+                                font_size: md_font,
+                                keys_enabled,
+                            };
+                            Some(board.show(ui, &mut env))
+                        }
+                        _ => None,
+                    };
+                    if let Some(outcome) = outcome {
+                        if outcome.changed {
+                            self.mark_dirty(tab_idx);
+                        }
+                        if outcome.files_changed {
+                            self.image_resolver.clear();
+                            self.image_rels = None;
+                        }
+                        if let Some(status) = outcome.status {
+                            self.status = status;
+                        }
+                        if let Some(target) = outcome.open {
+                            self.open_path(&target, true);
+                        }
                     }
                 } else {
                 let stats = text_stats(&self.tabs[tab_idx].buffer);
@@ -3249,7 +3455,17 @@ impl CelestineApp {
                             items.push((s, n.rel.clone(), preview));
                         }
                     }
-                    for rel in vault.list_image_rel_paths() {
+                    let files = vault
+                        .list_image_rel_paths()
+                        .into_iter()
+                        .map(|rel| (rel, "image"))
+                        .chain(
+                            vault
+                                .list_canvas_rel_paths()
+                                .into_iter()
+                                .map(|rel| (rel, "canvas")),
+                        );
+                    for (rel, kind) in files {
                         let score = if empty_q {
                             Some(match recency_rank(&rel) {
                                 Some(i) => 1_000_000 - i as i64,
@@ -3265,11 +3481,11 @@ impl CelestineApp {
                         };
                         if let Some(s) = score {
                             let tag = if recency_rank(&rel).is_some() && empty_q {
-                                "recent · image"
+                                format!("recent · {kind}")
                             } else {
-                                "image"
+                                kind.to_string()
                             };
-                            items.push((s, rel, tag.into()));
+                            items.push((s, rel, tag));
                         }
                     }
                 }
@@ -3283,6 +3499,7 @@ impl CelestineApp {
                     Command::ThemePicker,
                     Command::Graph,
                     Command::NewNote,
+                    Command::NewCanvas,
                     Command::NewFolder,
                     Command::Rename,
                     Command::DeleteItem,
@@ -3361,7 +3578,7 @@ impl CelestineApp {
                 chosen = Some(id.clone());
             } else if self.overlay == Overlay::QuickOpen && !self.overlay_query.is_empty() {
                 let q = self.overlay_query.trim();
-                chosen = Some(if crate::media::is_image_rel(q) {
+                chosen = Some(if crate::media::is_image_rel(q) || is_canvas_rel(q) {
                     q.replace('\\', "/")
                 } else {
                     ensure_md_path(q)
@@ -4123,6 +4340,29 @@ mod tests {
     }
 
     #[test]
+    fn canvas_tab_saves_and_follows_note_renames() {
+        let (_d, mut app) = app_with_notes(&["Note.md"]);
+        app.open_canvas("Board.canvas", false);
+        assert_eq!(app.tabs[app.active_tab].kind, TabKind::Canvas, "{}", app.status);
+        let board = app.active_canvas().unwrap();
+        board
+            .doc
+            .nodes
+            .push(celestine_core::canvas::CanvasNode::new_file(0.0, 0.0, 400.0, 300.0, "Note.md"));
+        app.mark_dirty(app.active_tab);
+        app.save_all_dirty(false);
+        assert!(!app.tabs[app.active_tab].dirty);
+
+        app.start_tree_rename(file_tree::TreeNavItem::File("Note.md".into()));
+        app.commit_tree_rename("Renamed".into());
+        let vault = app.vault.as_ref().unwrap();
+        let on_disk = vault.read_canvas("Board.canvas").unwrap();
+        assert_eq!(on_disk.nodes[0].file.as_deref(), Some("Renamed.md"));
+        let board = app.tabs.iter().find_map(|t| t.canvas.as_deref()).unwrap();
+        assert_eq!(board.doc.nodes[0].file.as_deref(), Some("Renamed.md"));
+    }
+
+    #[test]
     fn tree_rename_of_image_keeps_its_extension() {
         let (d, mut app) = app_with_notes(&["Note.md"]);
         std::fs::write(d.path().join("pic.png"), b"x").unwrap();
@@ -4138,6 +4378,49 @@ mod tests {
         app.start_tree_rename(file_tree::TreeNavItem::File("Note.md".into()));
         app.commit_tree_rename("Other.md".into());
         assert_eq!(vault_rels(&app), vec!["Other.md"]);
+    }
+
+    #[test]
+    fn tree_drag_move_relocates_note_and_open_tab() {
+        let (_d, mut app) = app_with_notes(&["Note.md", "Projects/Keep.md"]);
+        app.open_note("Note.md", false);
+        app.commit_tree_move(file_tree::TreeMoveRequest {
+            source: file_tree::TreeNavItem::File("Note.md".into()),
+            dest_folder: Some("Projects".into()),
+        });
+        assert_eq!(
+            vault_rels(&app),
+            vec!["Projects/Keep.md", "Projects/Note.md"],
+            "{}",
+            app.status
+        );
+        assert_eq!(active_rel(&app), "Projects/Note.md");
+        assert!(app.tree_expanded.contains("Projects"));
+    }
+
+    #[test]
+    fn tree_drag_move_folder_updates_nested_paths() {
+        let (_d, mut app) = app_with_notes(&["Projects/Note.md", "Archive/Keep.md"]);
+        app.open_note("Projects/Note.md", false);
+        app.tree_expanded.insert("Projects".into());
+        app.folder_icons
+            .insert("Projects".into(), "star".into());
+        app.commit_tree_move(file_tree::TreeMoveRequest {
+            source: file_tree::TreeNavItem::Dir("Projects".into()),
+            dest_folder: Some("Archive".into()),
+        });
+        assert_eq!(
+            vault_rels(&app),
+            vec!["Archive/Keep.md", "Archive/Projects/Note.md"],
+            "{}",
+            app.status
+        );
+        assert_eq!(active_rel(&app), "Archive/Projects/Note.md");
+        assert!(app.tree_expanded.contains("Archive/Projects"));
+        assert_eq!(
+            app.folder_icons.get("Archive/Projects").map(String::as_str),
+            Some("star")
+        );
     }
 
     #[test]
