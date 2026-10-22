@@ -11,7 +11,9 @@ use crate::table_ui::{self, TableStyle};
 use crate::theme_apply::{self, color, naked_button, naked_icon, sidebar_toggle};
 use crate::update_check::UpdateChecker;
 use celestine_core::{extract_note_data, NoteId, Vault};
-use celestine_theme::{list_available_themes, load_theme, ThemeTokens};
+use celestine_theme::{
+    list_available_themes, load_theme, omarchy_revision, ThemeTokens, OMARCHY_THEME_NAME,
+};
 use egui::text::{CCursor, CCursorRange};
 use egui::{FontId, RichText, ScrollArea, Stroke, TextEdit, Ui};
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -88,6 +90,8 @@ pub struct CelestineApp {
     keymap: Keymap,
     theme: ThemeTokens,
     theme_name: String,
+    /// Last seen Omarchy theme revision while `omarchy` is selected (live sync).
+    omarchy_rev: Option<String>,
     overlay: Overlay,
     overlay_query: String,
     overlay_selected: usize,
@@ -137,16 +141,18 @@ impl CelestineApp {
         let mut persist = AppState::load();
         persist.clear_recent_missing();
 
-        let theme_name = std::env::var("CELESTINE_THEME")
-            .ok()
-            .or_else(|| persist.theme.clone())
-            .unwrap_or_else(|| {
-                if crate::keybinds::is_omarchy() {
-                    "terminal".into()
-                } else {
-                    "neovoid".into()
-                }
-            });
+        let theme_name = normalize_theme_name(
+            std::env::var("CELESTINE_THEME")
+                .ok()
+                .or_else(|| persist.theme.clone())
+                .unwrap_or_else(|| {
+                    if crate::keybinds::is_omarchy() {
+                        OMARCHY_THEME_NAME.into()
+                    } else {
+                        "neovoid".into()
+                    }
+                }),
+        );
         let theme = load_theme(&theme_name).unwrap_or_default();
         crate::fonts::install(&cc.egui_ctx);
         theme_apply::apply_theme(&cc.egui_ctx, &theme, persist.ui_font_scale);
@@ -182,6 +188,7 @@ impl CelestineApp {
             keymap,
             theme,
             theme_name,
+            omarchy_rev: omarchy_revision(),
             overlay: Overlay::None,
             overlay_query: String::new(),
             overlay_selected: 0,
@@ -284,14 +291,40 @@ impl CelestineApp {
     }
 
     fn set_theme(&mut self, name: &str, ctx: &egui::Context) {
-        if let Ok(t) = load_theme(name) {
-            self.theme_name = name.to_string();
+        let name = normalize_theme_name(name);
+        if let Ok(t) = load_theme(&name) {
+            self.theme_name = name.clone();
             self.theme = t;
-            self.persist.theme = Some(name.to_string());
+            self.persist.theme = Some(name.clone());
             self.persist.save();
+            if name == OMARCHY_THEME_NAME {
+                self.omarchy_rev = omarchy_revision();
+            }
             theme_apply::apply_theme(ctx, &self.theme, self.persist.ui_font_scale);
             self.status = format!("theme {name}");
         }
+    }
+
+    /// When the Omarchy theme is active, follow `omarchy theme set` / theme-set hooks.
+    fn sync_omarchy_theme_if_needed(&mut self, ctx: &egui::Context) {
+        if self.theme_name != OMARCHY_THEME_NAME {
+            return;
+        }
+        let Some(rev) = omarchy_revision() else {
+            return;
+        };
+        if self.omarchy_rev.as_deref() == Some(rev.as_str()) {
+            return;
+        }
+        // Skip mid-swap frames where the staged theme dir is briefly empty.
+        let Some(t) = celestine_theme::load_omarchy_theme() else {
+            return;
+        };
+        self.theme = t;
+        self.omarchy_rev = Some(rev);
+        theme_apply::apply_theme(ctx, &self.theme, self.persist.ui_font_scale);
+        self.status = "theme omarchy (synced)".into();
+        ctx.request_repaint();
     }
 
     fn bump_editor_font(&mut self, delta: f32) {
@@ -1352,6 +1385,14 @@ fn is_canvas_rel(rel: &str) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("canvas"))
 }
 
+/// Map legacy `terminal` (Omarchy bridge) onto the current `omarchy` name.
+fn normalize_theme_name(name: impl AsRef<str>) -> String {
+    match name.as_ref() {
+        "terminal" => OMARCHY_THEME_NAME.to_string(),
+        other => other.to_string(),
+    }
+}
+
 fn chrono_lite_stamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let t = SystemTime::now()
@@ -1387,6 +1428,12 @@ impl eframe::App for CelestineApp {
             ctx.request_repaint();
         } else if self.update_checker.pending() {
             ctx.request_repaint_after(std::time::Duration::from_millis(400));
+        }
+
+        if self.theme_name == OMARCHY_THEME_NAME {
+            self.sync_omarchy_theme_if_needed(ctx);
+            // Pick up `omarchy theme set` while the window is idle / unfocused.
+            ctx.request_repaint_after(std::time::Duration::from_millis(750));
         }
         // Respect a previously dismissed feature line.
         if let Some(info) = self.update_checker.available() {
@@ -4199,6 +4246,7 @@ mod note_open_boundary_tests {
             keymap: Keymap::default(),
             theme: ThemeTokens::default(),
             theme_name: "test".into(),
+            omarchy_rev: None,
             overlay: Overlay::None,
             overlay_query: String::new(),
             overlay_selected: 0,

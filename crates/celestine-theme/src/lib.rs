@@ -3,11 +3,12 @@
 mod omarchy;
 mod parse;
 
-pub use omarchy::load_omarchy_terminal;
+pub use omarchy::{is_omarchy, load_omarchy_theme, omarchy_revision};
 pub use parse::{parse_css_vars, ThemeTokens};
 
 use std::path::{Path, PathBuf};
 
+/// Static CSS packs shipped with the app (excludes the live Omarchy bridge).
 pub const BUILTIN_THEME_NAMES: &[&str] = &[
     "obsidian-dark",
     "obsidian-light",
@@ -28,8 +29,14 @@ pub const BUILTIN_THEME_NAMES: &[&str] = &[
     "ayu-dark",
     "oxocarbon",
     "high-contrast",
-    "terminal",
 ];
+
+/// Canonical name for the Omarchy-synced theme. Legacy `terminal` still loads.
+pub const OMARCHY_THEME_NAME: &str = "omarchy";
+
+fn is_omarchy_theme_name(name: &str) -> bool {
+    name == OMARCHY_THEME_NAME || name == "terminal"
+}
 
 /// Builtin CSS embedded at compile time so themes work even when the install
 /// layout doesn't put `themes/` on disk (notably Homebrew's `share/celestine-md`).
@@ -120,11 +127,11 @@ pub fn find_themes_dir() -> Option<PathBuf> {
 }
 
 pub fn load_theme(name: &str) -> Result<ThemeTokens, String> {
-    if name == "terminal" {
-        if let Some(t) = load_omarchy_terminal() {
+    if is_omarchy_theme_name(name) {
+        if let Some(t) = load_omarchy_theme() {
             return Ok(t);
         }
-        return Ok(ThemeTokens::terminal_fallback());
+        return Ok(ThemeTokens::omarchy_fallback());
     }
     // Prefer on-disk packs (user overrides / packaged installs).
     if let Some(dir) = find_themes_dir() {
@@ -154,13 +161,21 @@ pub fn load_theme_file(path: &Path) -> Result<ThemeTokens, String> {
 }
 
 pub fn list_available_themes() -> Vec<String> {
-    let mut names: Vec<String> = BUILTIN_THEME_NAMES.iter().map(|s| (*s).to_string()).collect();
+    let mut names: Vec<String> = Vec::new();
+    // Live Omarchy bridge first when the desktop is present.
+    if is_omarchy() {
+        names.push(OMARCHY_THEME_NAME.to_string());
+    }
+    names.extend(BUILTIN_THEME_NAMES.iter().map(|s| (*s).to_string()));
     if let Some(dir) = find_themes_dir() {
         if let Ok(rd) = std::fs::read_dir(dir) {
             for e in rd.flatten() {
                 let p = e.path();
                 if p.extension().and_then(|x| x.to_str()) == Some("css") {
                     if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                        if stem == "terminal" || stem == OMARCHY_THEME_NAME {
+                            continue;
+                        }
                         if !names.iter().any(|n| n == stem) {
                             names.push(stem.to_string());
                         }
@@ -179,9 +194,6 @@ mod tests {
     #[test]
     fn embedded_builtins_parse() {
         for name in BUILTIN_THEME_NAMES {
-            if *name == "terminal" {
-                continue;
-            }
             let t = load_theme(name).expect(name);
             assert_eq!(t.name, *name);
             // Sanity: not all-zero (would mean parse failed silently)
@@ -190,6 +202,14 @@ mod tests {
                 "{name} parsed to empty colors"
             );
         }
+    }
+
+    #[test]
+    fn omarchy_alias_loads() {
+        let t = load_theme("omarchy").expect("omarchy");
+        assert_eq!(t.name, "omarchy");
+        let legacy = load_theme("terminal").expect("terminal alias");
+        assert_eq!(legacy.name, "omarchy");
     }
 
     #[test]

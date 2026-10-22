@@ -71,23 +71,31 @@ impl ThemePalette {
             ah * 0.28 + seed * 0.72
         };
 
-        let folder = std::array::from_fn(|i| {
-            let h = (base_h + i as f32 * 36.0) % 360.0;
-            let (s, v) = if dark {
-                (0.62_f32.max(asat * 0.9).min(0.92), 0.82_f32.max(aval).min(0.98))
-            } else {
-                (0.68_f32.max(asat).min(0.94), 0.52_f32.min(aval.max(0.40)).max(0.36))
-            };
-            // Alternate saturation slightly so neighbors don't blend.
-            let s = (s + if i % 2 == 0 { 0.08 } else { -0.05 }).clamp(0.45, 0.95);
-            hsv_to_rgb(h, s, v)
-        });
+        let folder = if let Some(ramp) = t.folder_ramp {
+            // Omarchy (and similar): use the theme's own chromatics verbatim.
+            std::array::from_fn(|i| color(ramp[i]))
+        } else {
+            std::array::from_fn(|i| {
+                let h = (base_h + i as f32 * 36.0) % 360.0;
+                let (s, v) = if dark {
+                    (0.62_f32.max(asat * 0.9).min(0.92), 0.82_f32.max(aval).min(0.98))
+                } else {
+                    (0.68_f32.max(asat).min(0.94), 0.52_f32.min(aval.max(0.40)).max(0.36))
+                };
+                // Alternate saturation slightly so neighbors don't blend.
+                let s = (s + if i % 2 == 0 { 0.08 } else { -0.05 }).clamp(0.45, 0.95);
+                hsv_to_rgb(h, s, v)
+            })
+        };
 
-        // Headings: H1 = accent, rest walk the theme's hue personality.
+        // Headings: H1 = accent, rest walk the theme's hue personality —
+        // or step through Omarchy chromatics when a ramp is present.
         let (tah, tsat, _) = rgb_to_hsv(text_accent);
         let h1 = accent;
         let h2 = if tsat > 0.2 {
             text_accent
+        } else if let Some(ramp) = t.folder_ramp {
+            color(ramp[1])
         } else {
             hsv_to_rgb(
                 (base_h + 32.0) % 360.0,
@@ -95,21 +103,27 @@ impl ThemePalette {
                 if dark { 0.90 } else { 0.46 },
             )
         };
-        let h3 = hsv_to_rgb(
-            (tah * 0.35 + base_h * 0.65 + 64.0) % 360.0,
-            if dark { 0.54 } else { 0.60 },
-            if dark { 0.92 } else { 0.48 },
-        );
-        let h4 = hsv_to_rgb(
-            (base_h + 118.0) % 360.0,
-            if dark { 0.56 } else { 0.64 },
-            if dark { 0.84 } else { 0.44 },
-        );
-        let h5 = hsv_to_rgb(
-            (base_h + 168.0) % 360.0,
-            if dark { 0.50 } else { 0.58 },
-            if dark { 0.86 } else { 0.46 },
-        );
+        let (h3, h4, h5) = if let Some(ramp) = t.folder_ramp {
+            (color(ramp[2]), color(ramp[3]), color(ramp[5]))
+        } else {
+            (
+                hsv_to_rgb(
+                    (tah * 0.35 + base_h * 0.65 + 64.0) % 360.0,
+                    if dark { 0.54 } else { 0.60 },
+                    if dark { 0.92 } else { 0.48 },
+                ),
+                hsv_to_rgb(
+                    (base_h + 118.0) % 360.0,
+                    if dark { 0.56 } else { 0.64 },
+                    if dark { 0.84 } else { 0.44 },
+                ),
+                hsv_to_rgb(
+                    (base_h + 168.0) % 360.0,
+                    if dark { 0.50 } else { 0.58 },
+                    if dark { 0.86 } else { 0.46 },
+                ),
+            )
+        };
         let h6 = mix(text, muted, 0.28);
 
         Self {
@@ -156,7 +170,7 @@ fn theme_hue_seed(name: &str) -> f32 {
         "ayu-dark" => 35.0,
         "oxocarbon" => 330.0,
         "high-contrast" => 50.0,
-        "terminal" => 215.0,
+        "omarchy" | "terminal" => 215.0,
         other => {
             let mut h = 0u32;
             for b in other.bytes() {

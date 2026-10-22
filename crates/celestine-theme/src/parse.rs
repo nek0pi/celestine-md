@@ -12,6 +12,9 @@ pub struct ThemeTokens {
     pub text_accent: [u8; 3],
     pub interactive_accent: [u8; 3],
     pub selection: [u8; 3],
+    /// When set (Omarchy bridge), folder rainbows use these colors instead of a
+    /// synthetic HSV walk around the accent.
+    pub folder_ramp: Option<[[u8; 3]; 10]>,
 }
 
 impl Default for ThemeTokens {
@@ -32,12 +35,13 @@ impl ThemeTokens {
             text_accent: [0x7f, 0x6d, 0xf2],
             interactive_accent: [0x7f, 0x6d, 0xf2],
             selection: [0x3a, 0x3a, 0x4a],
+            folder_ramp: None,
         }
     }
 
-    pub fn terminal_fallback() -> Self {
+    pub fn omarchy_fallback() -> Self {
         Self {
-            name: "terminal".into(),
+            name: "omarchy".into(),
             background_primary: [0x0c, 0x0c, 0x0c],
             background_secondary: [0x14, 0x14, 0x14],
             background_modifier_border: [0x33, 0x33, 0x33],
@@ -46,6 +50,18 @@ impl ThemeTokens {
             text_accent: [0x7a, 0xa2, 0xf7],
             interactive_accent: [0x7a, 0xa2, 0xf7],
             selection: [0x29, 0x2e, 0x42],
+            folder_ramp: Some([
+                [0xf7, 0x76, 0x8e], // red
+                [0xeb, 0x92, 0x7b], // orange
+                [0xe0, 0xaf, 0x68], // yellow
+                [0x9e, 0xce, 0x6a], // green
+                [0x44, 0x9d, 0xab], // cyan
+                [0x7a, 0xa2, 0xf7], // blue
+                [0xad, 0x8e, 0xe6], // magenta
+                [0x75, 0x49, 0x3d], // brown
+                [0xff, 0x7a, 0x93], // bright_red
+                [0x7d, 0xa6, 0xff], // bright_blue
+            ]),
         }
     }
 
@@ -57,9 +73,10 @@ impl ThemeTokens {
         accent: [u8; 3],
         selection: [u8; 3],
         muted: [u8; 3],
+        folder_ramp: [[u8; 3]; 10],
     ) -> Self {
         Self {
-            name: "terminal".into(),
+            name: "omarchy".into(),
             background_primary: background,
             background_secondary: lighter_background,
             background_modifier_border: muted,
@@ -68,6 +85,7 @@ impl ThemeTokens {
             text_accent: accent,
             interactive_accent: accent,
             selection,
+            folder_ramp: Some(folder_ramp),
         }
     }
 }

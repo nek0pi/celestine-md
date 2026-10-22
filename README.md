@@ -84,7 +84,7 @@ Most note apps either ship Electron bloat or lock you into a proprietary store.
 
 ### Themes & keys
 - Built-in **CSS custom-property** packs with distinct folder/heading palettes
-- **`terminal`** theme follows [Omarchy](https://omarchy.org) `colors.toml` when present
+- **`omarchy`** theme follows the active [Omarchy](https://omarchy.org) desktop theme (`colors.toml`) and updates live on `omarchy theme set`
 - Remappable TOML keybindings — Obsidian + Omarchy-friendly profiles
 - Color emoji via system fonts
 - **Canvas** boards (`.canvas`, [JSON Canvas](https://jsoncanvas.org)): nib-pen ink, text / note / image cards, arrows between anything, pixel dot grid — see [docs/INSPIRATION.md](docs/INSPIRATION.md#canvas)
@@ -196,7 +196,7 @@ Full map: [`docs/INSPIRATION.md`](docs/INSPIRATION.md).
 
 Ship-ready packs in [`themes/`](themes/):
 
-`obsidian-dark` · `obsidian-light` · `catppuccin` · `tokyo-night` · `gruvbox-dark` · `gruvbox-light` · `nord` · `solarized-dark` · `solarized-light` · `dracula` · `rose-pine` · `everforest-dark` · **`neovoid`** · `one-dark` · `monokai` · `kanagawa` · `ayu-dark` · `oxocarbon` · `high-contrast` · **`terminal`**
+`obsidian-dark` · `obsidian-light` · `catppuccin` · `tokyo-night` · `gruvbox-dark` · `gruvbox-light` · `nord` · `solarized-dark` · `solarized-light` · `dracula` · `rose-pine` · `everforest-dark` · **`neovoid`** · `one-dark` · `monokai` · `kanagawa` · `ayu-dark` · `oxocarbon` · `high-contrast` · **`omarchy`** (Omarchy hosts only)
 
 ```bash
 CELESTINE_THEME=neovoid celestine ~/Notes

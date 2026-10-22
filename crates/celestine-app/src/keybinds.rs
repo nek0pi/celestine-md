@@ -454,7 +454,7 @@ fn pretty_chord(s: &str) -> String {
 }
 
 pub fn is_omarchy() -> bool {
-    PathBuf::from("/usr/share/omarchy").is_dir() || std::env::var_os("OMARCHY_PATH").is_some()
+    celestine_theme::is_omarchy()
 }
 
 fn user_keybind_path() -> Option<PathBuf> {

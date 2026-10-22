@@ -55,7 +55,7 @@ A `.canvas` file opens as a pan/zoom board drawn in Celestine's own TUI/pixel st
 ### Themes
 Built-in CSS packs (distinct folder/heading palettes per pack):
 
-`obsidian-dark` · `obsidian-light` · `catppuccin` · `tokyo-night` · `gruvbox-dark` · `gruvbox-light` · `nord` · `solarized-dark` · `solarized-light` · `dracula` · `rose-pine` · `everforest-dark` · **`neovoid`** · `one-dark` · `monokai` · `kanagawa` · `ayu-dark` · `oxocarbon` · `high-contrast` · **`terminal`** (Omarchy `colors.toml` when present)
+`obsidian-dark` · `obsidian-light` · `catppuccin` · `tokyo-night` · `gruvbox-dark` · `gruvbox-light` · `nord` · `solarized-dark` · `solarized-light` · `dracula` · `rose-pine` · `everforest-dark` · **`neovoid`** · `one-dark` · `monokai` · `kanagawa` · `ayu-dark` · `oxocarbon` · `high-contrast` · **`omarchy`** (on Omarchy: follows the active desktop theme / `colors.toml`, live on `theme set`)
 
 Theme picker: **Mod+T**. Flat flea-like chrome (naked buttons, JetBrains Mono when available).
 
@@ -86,7 +86,7 @@ Remap: copy [`config/keybindings.omarchy.toml`](../config/keybindings.omarchy.to
 
 ```
 crates/celestine-core/    vault FS, parse, index, resolve, graph
-crates/celestine-theme/   CSS-var packs + Omarchy terminal bridge
+crates/celestine-theme/   CSS-var packs + Omarchy theme bridge
 crates/celestine-app/     egui shell (tree, editor, preview, graph, overlays)
 themes/                   built-in *.css
 config/                   default keybinding profiles
