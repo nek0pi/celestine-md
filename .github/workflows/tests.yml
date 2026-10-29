@@ -46,11 +46,26 @@ jobs:
 
       - name: Test workspace (Linux and macOS)
         if: runner.os != 'Windows'
-        run: cargo test --workspace --locked
+        shell: bash
+        run: cargo test --workspace --locked 2>&1 | tee test-output.log
 
       - name: Test workspace (Windows)
         if: runner.os == 'Windows'
+        shell: bash
         env:
           # Keep linker paths short with the workspace's dependency tree.
           CARGO_TARGET_DIR: C:/c/target
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked 2>&1 | tee test-output.log
+
+      - name: Report test failure details
+        if: failure()
+        shell: python
+        run: |
+          from pathlib import Path
+          log = Path("test-output.log")
+          if log.exists():
+              # Expose the failure summary in check annotations as well as logs.
+              # This also permits diagnosis using the public GitHub API.
+              message = "\n".join(log.read_text(errors="replace").splitlines()[-100:])[-12000:]
+              message = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print(f"::error title=Workspace test failure::{message}")

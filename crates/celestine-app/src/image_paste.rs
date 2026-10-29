@@ -278,7 +278,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 crate::media::resolve_image_abs(vault.root(), note, &dest, &[]),
-                Some(root.path().join(&rel))
+                Some(root.path().join(&rel).canonicalize().unwrap())
             );
         }
     }
