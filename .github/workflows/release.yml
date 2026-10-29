@@ -12,8 +12,8 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to build (e.g. v0.1.0) — optional for manual runs"
-        required: false
+        description: "Existing release tag to build (e.g. v0.3.4)"
+        required: true
         default: ""
 
 permissions:
@@ -21,6 +21,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -55,6 +56,18 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Verify release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
+          test "$RELEASE_TAG" = "v$VERSION" || {
+            echo "Tag $RELEASE_TAG does not match Cargo version $VERSION"
+            exit 1
+          }
 
       - name: Install Linux GUI deps
         if: runner.os == 'Linux'
@@ -76,21 +89,21 @@ jobs:
         if: matrix.native != true
         env:
           RUSTFLAGS: "-C debuginfo=0"
-        run: cargo build -p celestine-app --release --target ${{ matrix.target }}
+        run: cargo build -p celestine-app --release --locked --target ${{ matrix.target }}
 
       - name: Build release (Windows native)
         if: matrix.native == true
         env:
           # Short paths avoid MAX_PATH link failures with deep crate trees.
           CARGO_TARGET_DIR: C:/c/target
-        run: cargo build -p celestine-app --release
+        run: cargo build -p celestine-app --release --locked
 
       - name: Stage package (Unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
-          VER="${GITHUB_REF_NAME:-dev}"
+          VER="$RELEASE_TAG"
           STAGE="dist/${{ matrix.artifact }}"
           mkdir -p "$STAGE/bin" "$STAGE/share/celestine/themes" "$STAGE/share/celestine/config" \
                    "$STAGE/share/applications" "$STAGE/share/icons/hicolor/scalable/apps"
@@ -131,7 +144,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          VER="${GITHUB_REF_NAME:-dev}"
+          VER="$RELEASE_TAG"
           STAGE="dist/${{ matrix.artifact }}"
           mkdir -p "$STAGE" "$STAGE/themes" "$STAGE/config"
           # Native Windows build (CARGO_TARGET_DIR override or default).
@@ -174,52 +187,39 @@ jobs:
     name: Publish GitHub Release
     needs: build
     runs-on: ubuntu-22.04
-    # Publish whatever platforms succeeded (don't block the whole release on one OS).
-    if: always() && startsWith(github.ref, 'refs/tags/v') && needs.build.result != 'cancelled'
+    # Publish only after every supported platform has built successfully.
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(inputs.tag, 'v')
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - name: Flatten artifacts
+      - name: Verify release assets and generate checksums
+        shell: bash
         run: |
+          set -euo pipefail
           mkdir -p release-assets
           find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec cp -v {} release-assets/ \;
-          ls -la release-assets/
-          test -n "$(ls -A release-assets 2>/dev/null)" || {
-            echo "No release assets from build jobs"
-            exit 1
-          }
+          for platform in linux-x86_64 macos-aarch64 macos-x86_64; do
+            test -s "release-assets/celestine-${platform}-${RELEASE_TAG}.tar.gz"
+          done
+          test -s "release-assets/celestine-windows-x86_64-${RELEASE_TAG}.zip"
+          cd release-assets
+          sha256sum *.tar.gz *.zip > SHA256SUMS
+          cat SHA256SUMS
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           draft: false
           generate_release_notes: true
+          body_path: RELEASE_NOTES.md
           files: release-assets/*
           fail_on_unmatched_files: true
-          body: |
-            ## CelestineMD ${{ github.ref_name }}
-
-            Ultralight Obsidian-inspired Markdown notes (Rust / egui).
-
-            ### Downloads
-            | Platform | Archive |
-            |----------|---------|
-            | Linux x86_64 | `celestine-linux-x86_64-*.tar.gz` |
-            | macOS Apple Silicon | `celestine-macos-aarch64-*.tar.gz` |
-            | macOS Intel | `celestine-macos-x86_64-*.tar.gz` |
-            | Windows x86_64 | `celestine-windows-x86_64-*.zip` |
-
-            ### Install (Linux / macOS)
-            ```bash
-            tar -xzf celestine-*-*.tar.gz
-            ./celestine-*/bin/celestine ~/Notes
-            # or: sudo cp celestine-*/bin/celestine /usr/local/bin/
-            ```
-
-            See [docs/RELEASE.md](docs/RELEASE.md) for Homebrew / AUR notes.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -592,7 +592,7 @@ dependencies = [
 
 [[package]]
 name = "celestine-app"
-version = "0.3.1"
+version = "0.3.4"
 dependencies = [
  "celestine-core",
  "celestine-theme",
@@ -615,7 +615,7 @@ dependencies = [
 
 [[package]]
 name = "celestine-core"
-version = "0.3.1"
+version = "0.3.4"
 dependencies = [
  "notify",
  "petgraph 0.7.1",
@@ -632,7 +632,7 @@ dependencies = [
 
 [[package]]
 name = "celestine-theme"
-version = "0.3.1"
+version = "0.3.4"
 dependencies = [
  "directories",
  "regex",

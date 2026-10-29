@@ -15,6 +15,11 @@ The app compares the running build to the latest GitHub release and notifies onl
 
 GitHub Actions (`.github/workflows/release.yml`) builds **Linux**, **macOS** (Intel + Apple Silicon), and **Windows** archives when you push a version tag (`v0.1.0`, …).
 
+The workflow verifies that the tag matches the Cargo version and publishes only
+after all four builds succeed. It includes `SHA256SUMS` and uses
+`RELEASE_NOTES.md` for the release description. Update those notes before tagging.
+For a manual rerun, supply the existing version tag in the workflow's `tag` input.
+
 ## What you must do (accounts I can’t use for you)
 
 | Channel | Ready in-repo? | Needs your action |

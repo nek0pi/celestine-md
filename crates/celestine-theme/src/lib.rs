@@ -133,8 +133,12 @@ pub fn load_theme(name: &str) -> Result<ThemeTokens, String> {
         }
         return Ok(ThemeTokens::omarchy_fallback());
     }
+    load_theme_with_dir(name, find_themes_dir().as_deref())
+}
+
+fn load_theme_with_dir(name: &str, dir: Option<&Path>) -> Result<ThemeTokens, String> {
     // Prefer on-disk packs (user overrides / packaged installs).
-    if let Some(dir) = find_themes_dir() {
+    if let Some(dir) = dir {
         let path = dir.join(format!("{name}.css"));
         if path.is_file() {
             let mut t = load_theme_file(&path)?;
@@ -244,11 +248,9 @@ mod tests {
             r#":root { --background-primary: #010203; --text-accent: #aabbcc; }"#,
         )
         .unwrap();
-        // Point discovery at our temp dir by using CWD relative "themes"
-        let prev = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir.parent().unwrap()).unwrap();
-        let t = load_theme("catppuccin").expect("load");
-        std::env::set_current_dir(prev).unwrap();
+        // Exercise the same loading path with an isolated directory. Installed
+        // user themes can take precedence over CWD, and CWD is process-global.
+        let t = load_theme_with_dir("catppuccin", Some(&dir)).expect("load");
         assert_eq!(t.background_primary, [0x01, 0x02, 0x03], "should load on-disk override");
         assert_eq!(t.text_accent, [0xaa, 0xbb, 0xcc]);
     }
