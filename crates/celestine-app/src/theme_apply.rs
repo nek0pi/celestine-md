@@ -50,6 +50,9 @@ pub struct ThemePalette {
     pub panel_bg: Color32,
     pub folder: [Color32; 10],
     pub heading: [Color32; 6],
+    /// Row tints for added / removed diff lines (themes define no success/error colors).
+    pub diff_add: Color32,
+    pub diff_del: Color32,
 }
 
 impl ThemePalette {
@@ -125,6 +128,9 @@ impl ThemePalette {
             )
         };
         let h6 = mix(text, muted, 0.28);
+        let tint = if dark { 0.20 } else { 0.28 };
+        let diff_add = mix(content, Color32::from_rgb(64, 190, 96), tint);
+        let diff_del = mix(content, Color32::from_rgb(220, 72, 72), tint);
 
         Self {
             name: t.name.clone(),
@@ -137,6 +143,8 @@ impl ThemePalette {
             panel_bg: panel,
             folder,
             heading: [h1, h2, h3, h4, h5, h6],
+            diff_add,
+            diff_del,
         }
     }
 

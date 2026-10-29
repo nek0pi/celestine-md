@@ -73,6 +73,8 @@ Most note apps either ship Electron bloat or lock you into a proprietary store.
 
 ### Core knowledge loop
 - **File tree** — rainbow folders, custom marks, click expand, double-click / F2 rename, `Ctrl+Tab` toggles files ↔ editor
+- **Paste images into notes** — `Ctrl/Cmd+V` saves a timestamped PNG and displays it inline beneath its editable Markdown embed. Choose the folder for future pastes in Settings → Image folder (per vault; defaults to `images/`).
+- **Resize note images** — drag the bottom-right corner in preview or editing; double-click the grip to reset. Sizes are saved as `![caption|320](image.png)` (width, preserving aspect ratio) or `![caption|320x180](image.png)` (width × height). Obsidian embeds such as `![[image.png|320]]` work too. Dimensions use pixels and fit within the note column.
 - **Fuzzy quick open** — `Ctrl/Cmd+O`
 - **Command palette** — `Ctrl/Cmd+P`
 - **Wikilinks** `[[Note]]`, aliases, heading jumps, embeds `![[…]]`

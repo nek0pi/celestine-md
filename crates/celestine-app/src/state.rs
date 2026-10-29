@@ -25,6 +25,9 @@ pub struct AppState {
     /// and the same feature release don't re-nag after dismiss.
     #[serde(default)]
     pub dismissed_update_line: Option<String>,
+    /// Show Git status and sync for vaults that are repository roots.
+    #[serde(default = "default_true")]
+    pub git_integration: bool,
 }
 
 fn default_ui_scale() -> f32 {
@@ -55,6 +58,7 @@ impl Default for AppState {
             show_left_sidebar: true,
             show_right_sidebar: true,
             dismissed_update_line: None,
+            git_integration: true,
         }
     }
 }

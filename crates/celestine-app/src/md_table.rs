@@ -535,7 +535,8 @@ mod tests {
     fn round_trip_simple() {
         let src = "| A | B |\n| --- | --- |\n| 1 | 2 |\n";
         let segs = segment_note(src);
-        assert_eq!(segs.len(), 1);
+        assert_eq!(segs.len(), 2);
+        assert!(matches!(&segs[1], Segment::Text { range } if range.start == src.len() && range.is_empty()));
         let Segment::Table { table, .. } = &segs[0] else {
             panic!("expected table");
         };

@@ -42,6 +42,11 @@ pub enum Command {
     NavBack,
     NavForward,
     RevealInTree,
+    GitSync,
+    GitCommit,
+    GitInit,
+    GitPanel,
+    GitPull,
 }
 
 impl Command {
@@ -84,6 +89,11 @@ impl Command {
             Command::NavBack => "Navigate back",
             Command::NavForward => "Navigate forward",
             Command::RevealInTree => "Reveal note in tree",
+            Command::GitSync => "Git: sync (commit, pull, push)",
+            Command::GitCommit => "Git: commit all changes",
+            Command::GitInit => "Git: initialize repository",
+            Command::GitPanel => "Git: open panel",
+            Command::GitPull => "Git: pull",
         }
     }
 
@@ -126,6 +136,11 @@ impl Command {
             Command::NavBack => "nav_back",
             Command::NavForward => "nav_forward",
             Command::RevealInTree => "reveal_in_tree",
+            Command::GitSync => "git_sync",
+            Command::GitCommit => "git_commit",
+            Command::GitInit => "git_init",
+            Command::GitPanel => "git_panel",
+            Command::GitPull => "git_pull",
         }
     }
 }
@@ -188,6 +203,8 @@ impl Keymap {
         k.set(Command::NavBack, "Mod+[");
         k.set(Command::NavForward, "Mod+]");
         k.set(Command::RevealInTree, "Mod+Shift+E");
+        k.set(Command::GitSync, "Mod+Shift+S");
+        k.set(Command::GitPanel, "Mod+Shift+G");
         k.bindings
             .insert(Command::Shortcuts, "? / Mod+/".into());
         k
@@ -382,6 +399,11 @@ fn command_from_id(id: &str) -> Option<Command> {
         "nav_back" => Command::NavBack,
         "nav_forward" => Command::NavForward,
         "reveal_in_tree" => Command::RevealInTree,
+        "git_sync" => Command::GitSync,
+        "git_commit" => Command::GitCommit,
+        "git_init" => Command::GitInit,
+        "git_panel" => Command::GitPanel,
+        "git_pull" => Command::GitPull,
         _ => return None,
     })
 }
@@ -436,7 +458,7 @@ fn parse_chord(s: &str) -> Option<KeyboardShortcut> {
     Some(KeyboardShortcut::new(mods, key?))
 }
 
-fn pretty_chord(s: &str) -> String {
+pub fn pretty_chord(s: &str) -> String {
     #[cfg(target_os = "macos")]
     {
         s.replace("Mod+", "⌘")

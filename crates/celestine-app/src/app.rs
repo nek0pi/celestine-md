@@ -1,5 +1,6 @@
 use crate::canvas_view::{BoardEnv, CanvasBoard};
 use crate::file_tree;
+use crate::git_sync::{self, GitEvent, VaultGit};
 use crate::graph_view::GraphState;
 use crate::keybinds::{ensure_user_config, Command, Keymap};
 use crate::md_edit;
@@ -33,6 +34,7 @@ enum Overlay {
     Find,
     ThemePicker,
     RecentVaults,
+    Git,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -63,6 +65,8 @@ struct OpenTab {
     scroll_to_char: Option<usize>,
     editor_text_id: egui::Id,
     canvas: Option<Box<CanvasBoard>>,
+    /// A pull changed this file while it had unsaved edits; autosave waits for the user.
+    remote_changed: bool,
 }
 
 /// Brief highlight after jumping to a find / search hit.
@@ -129,8 +133,14 @@ pub struct CelestineApp {
     update_banner_hidden: bool,
     image_resolver: crate::media::ImageResolver,
     image_rels: Option<Vec<String>>,
+    images_folder_draft: String,
     /// Fade-out wash on the jumped-to line (edit + preview).
     line_flash: Option<LineFlash>,
+    git: VaultGit,
+    /// Git panel: selected changed file, and the commit message draft.
+    git_selected: Option<String>,
+    git_message: String,
+    git_message_edited: bool,
 }
 
 impl CelestineApp {
@@ -218,13 +228,19 @@ impl CelestineApp {
             update_banner_hidden: false,
             image_resolver: crate::media::ImageResolver::default(),
             image_rels: None,
+            images_folder_draft: "images".into(),
             line_flash: None,
             autosave_at: None,
+            git: VaultGit::default(),
+            git_selected: None,
+            git_message: String::new(),
+            git_message_edited: false,
         }
     }
 
     fn open_vault(&mut self, path: PathBuf, ctx: &egui::Context) {
         self.save_all_dirty(false);
+        self.save_open_state();
         let wake_ctx = ctx.clone();
         match Vault::open_with_wakeup(&path, move || wake_ctx.request_repaint()) {
             Ok(v) => {
@@ -238,17 +254,23 @@ impl CelestineApp {
                 self.tabs.clear();
                 self.active_tab = 0;
                 self.show_graph = false;
-                let first = v
-                    .list_md_rel_paths()
-                    .into_iter()
-                    .find(|r| r.eq_ignore_ascii_case("Home.md"))
-                    .or_else(|| v.list_md_rel_paths().into_iter().next());
                 self.folder_icons = file_tree::load_folder_icons(&v);
-                self.recent_notes = load_recent_notes(&v);
+                self.images_folder_draft = match crate::image_paste::Settings::load(&v) {
+                    Ok(settings) => settings.images_folder,
+                    Err(e) => {
+                        self.status = format!("image settings: {e}");
+                        "images".into()
+                    }
+                };
+                let (recent_notes, last_open) = load_recent_notes(&v);
+                let restore = file_to_restore(&v, &recent_notes, last_open.as_deref());
+                self.recent_notes = recent_notes;
+                self.git
+                    .attach(Some(v.root()), self.persist.git_integration, ctx);
                 self.vault = Some(v);
                 self.persist.push_recent(&path);
-                if let Some(rel) = first {
-                    self.open_note(&rel, false);
+                if let Some(rel) = restore {
+                    self.open_path(&rel, false);
                 }
                 ctx.request_repaint();
             }
@@ -258,6 +280,7 @@ impl CelestineApp {
 
     fn close_vault(&mut self) {
         self.save_all_dirty(false);
+        self.save_open_state();
         self.image_resolver.clear();
         self.image_rels = None;
         self.vault = None;
@@ -270,6 +293,7 @@ impl CelestineApp {
         self.nav_forward.clear();
         self.folder_icons.clear();
         self.autosave_at = None;
+        self.git = VaultGit::default();
         // Keep last_vault so the next launch still restores; clear only the live session.
         self.status = "vault closed — open vault · recent vaults".into();
     }
@@ -408,6 +432,7 @@ impl CelestineApp {
             scroll_to_char: None,
             editor_text_id: egui::Id::new(("celestine-canvas", rel.clone())),
             canvas: Some(Box::new(CanvasBoard::new(doc))),
+            remote_changed: false,
         });
         self.active_tab = self.tabs.len() - 1;
         self.show_graph = false;
@@ -440,7 +465,7 @@ impl CelestineApp {
             .image_rels
             .get_or_insert_with(|| vault.list_image_rel_paths());
         self.image_resolver.set_context(vault.root(), note_rel, "");
-        let Some(image) = self.image_resolver.resolve(rel, images) else {
+        let Some(image) = self.image_resolver.resolve(&format!("wikilink:{rel}"), images) else {
             self.status = format!("missing image {rel}");
             return;
         };
@@ -471,6 +496,7 @@ impl CelestineApp {
             scroll_to_char: None,
             editor_text_id: egui::Id::new(("celestine-image", rel.to_string())),
             canvas: None,
+            remote_changed: false,
         });
         self.active_tab = self.tabs.len() - 1;
         self.show_graph = false;
@@ -540,6 +566,7 @@ impl CelestineApp {
             scroll_to_char: None,
             editor_text_id: egui::Id::new(("celestine-editor", rel.to_string())),
             canvas: None,
+            remote_changed: false,
         });
         self.active_tab = self.tabs.len() - 1;
         self.show_graph = false;
@@ -555,19 +582,104 @@ impl CelestineApp {
         self.recent_notes.retain(|r| r != &rel);
         self.recent_notes.insert(0, rel);
         self.recent_notes.truncate(48);
+        self.save_open_state();
+    }
+
+    fn save_open_state(&self) {
         if let Some(vault) = &self.vault {
-            save_recent_notes(vault, &self.recent_notes);
+            let active = self
+                .tabs
+                .get(self.active_tab)
+                .map(|tab| tab.rel.as_str())
+                .unwrap_or("");
+            save_recent_notes(vault, &self.recent_notes, active);
         }
     }
 
     /// Debounce window after the last edit before writing to disk.
     const AUTOSAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(400);
 
+    fn prepare_image_pastes(&mut self, tab_idx: usize, ctx: &egui::Context) {
+        if self.overlay != Overlay::None || self.focus != FocusPane::Editor {
+            return;
+        }
+        if !ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::PasteImage(_)))) {
+            return;
+        }
+        let tab = &self.tabs[tab_idx];
+        if tab.kind != TabKind::Note || tab.preview_mode {
+            return;
+        }
+        let focused = ctx.memory(|m| m.focused());
+        let has_text_focus = md_table::segment_note(&tab.buffer).iter().enumerate().any(|(si, seg)| {
+            matches!(seg, Segment::Text { .. }) && focused == Some(tab.editor_text_id.with(("seg", si)))
+        });
+        if !has_text_focus {
+            return;
+        }
+        let Some(vault) = &self.vault else { return; };
+        let note = tab.rel.clone();
+        let settings = crate::image_paste::Settings::load(vault);
+        let events = ctx.input_mut(|i| std::mem::take(&mut i.events));
+        let events = events.into_iter().filter_map(|event| {
+            let egui::Event::PasteImage(image) = event else { return Some(event); };
+            let result = settings.as_ref().map_err(Clone::clone).and_then(|settings| {
+                crate::image_paste::save_image(vault, &settings.images_folder, &image)
+            });
+            match result {
+                Ok(rel) => {
+                    self.image_resolver.clear();
+                    self.image_rels = None;
+                    self.status = format!("image pasted → {rel}");
+                    Some(egui::Event::Paste(crate::image_paste::embed(&note, &rel)))
+                }
+                Err(e) => {
+                    self.status = format!("image paste failed: {e} · check the image folder in settings");
+                    None
+                }
+            }
+        }).collect();
+        ctx.input_mut(|i| i.events = events);
+        ctx.request_repaint();
+    }
+
     fn mark_dirty(&mut self, tab_idx: usize) {
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             tab.dirty = true;
         }
         self.autosave_at = Some(Instant::now() + Self::AUTOSAVE_DELAY);
+    }
+
+    fn resize_preview_image(&mut self, tab_idx: usize, body: &str, edit: crate::image_size::ResizeEdit, ctx: &egui::Context) {
+        let tab = &mut self.tabs[tab_idx];
+        if !tab.buffer.ends_with(body) || edit.replacement(body).is_none() { return; }
+        let body_offset = tab.buffer.len() - body.len();
+        let image_start = body_offset + edit.embed.range.start;
+        let image_end = body_offset + edit.embed.range.end;
+        for (si, segment) in md_table::segment_note(&tab.buffer).into_iter().enumerate() {
+            let Segment::Text { range } = segment else { continue; };
+            if range.start <= image_start && image_end <= range.end {
+                let Some(edit) = edit.shifted(body_offset as isize - range.start as isize) else { return; };
+                let id = tab.editor_text_id.with(("seg", si));
+                let mut state = egui::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+                let mut text = tab.buffer[range.clone()].to_owned();
+                if crate::image_size::apply_in_editor(&mut text, &edit, &mut state) {
+                    tab.buffer.replace_range(range, &text);
+                    state.store(ctx, id);
+                    self.mark_dirty(tab_idx);
+                    ctx.request_repaint_after(Self::AUTOSAVE_DELAY);
+                }
+                return;
+            }
+        }
+    }
+
+    fn toggle_preview_task(&mut self, tab_idx: usize, body: &str, toggle: preview::TaskToggle) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if preview::apply_task_toggle(&mut tab.buffer, body, toggle) {
+                self.mark_dirty(tab_idx);
+            }
+        }
     }
 
     fn save_tab(&mut self, i: usize, announce: bool) {
@@ -613,25 +725,41 @@ impl CelestineApp {
     }
 
     fn save_active(&mut self) {
+        // An explicit save settles a remote-change prompt in favour of the editor.
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.remote_changed = false;
+        }
         self.save_tab(self.active_tab, true);
         if !self.tabs.iter().any(|t| t.dirty) {
             self.autosave_at = None;
         }
     }
 
-    /// Write every dirty note tab. Used by autosave, tab/vault close, and quit.
+    /// Write every dirty note tab. Used by tab/vault close and quit, where a
+    /// pending remote-change prompt resolves to keeping the editor's version.
     fn save_all_dirty(&mut self, announce: bool) {
+        self.save_dirty_tabs(announce, true);
+    }
+
+    /// Autosave and pre-git saves: leave tabs awaiting a remote-change choice alone.
+    fn save_settled_tabs(&mut self) {
+        self.save_dirty_tabs(false, false);
+    }
+
+    fn save_dirty_tabs(&mut self, announce: bool, include_remote_changed: bool) {
         let dirty: Vec<usize> = self
             .tabs
             .iter()
             .enumerate()
-            .filter(|(_, t)| t.dirty && t.kind != TabKind::Image)
+            .filter(|(_, t)| {
+                t.dirty && t.kind != TabKind::Image && (include_remote_changed || !t.remote_changed)
+            })
             .map(|(i, _)| i)
             .collect();
         for i in dirty {
             self.save_tab(i, announce);
         }
-        if !self.tabs.iter().any(|t| t.dirty) {
+        if !self.tabs.iter().any(|t| t.dirty && !t.remote_changed) {
             self.autosave_at = None;
         }
     }
@@ -641,8 +769,11 @@ impl CelestineApp {
             return;
         };
         let now = Instant::now();
-        if now >= due {
-            self.save_all_dirty(false);
+        if self.git.is_working() {
+            // Writing mid-pull could clobber files git is replacing.
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        } else if now >= due {
+            self.save_settled_tabs();
         } else {
             ctx.request_repaint_after(due.saturating_duration_since(now));
         }
@@ -672,6 +803,7 @@ impl CelestineApp {
         };
         self.active_tab = shift(self.active_tab);
         self.former_tab = shift(self.former_tab);
+        self.save_open_state();
     }
 
     /// Act on a link clicked in the preview.
@@ -701,6 +833,122 @@ impl CelestineApp {
                 }
             }
             LinkTarget::External(url) => ctx.open_url(egui::OpenUrl::new_tab(url)),
+        }
+    }
+
+    fn run_git_command(&mut self, cmd: Command) {
+        self.start_git(cmd, None);
+    }
+
+    /// Start a git operation; `message` overrides the generated commit message.
+    fn start_git(&mut self, cmd: Command, message: Option<String>) {
+        if self.vault.is_none() {
+            return;
+        }
+        if !self.persist.git_integration {
+            self.status = "git integration is off · enable it in settings".into();
+            return;
+        }
+        if cmd == Command::GitPanel {
+            if self.git.repo().is_some() || self.git.can_init() || self.git.git_missing() {
+                self.open_overlay(Overlay::Git);
+            } else {
+                self.status = "git: vault is not a repository yet".into();
+            }
+            return;
+        }
+        // Git must see what the editor shows.
+        self.save_settled_tabs();
+        let started = match cmd {
+            Command::GitSync => self.git.start_sync(message).map(|()| "git: syncing…"),
+            Command::GitCommit => self.git.start_commit(message).map(|()| "git: committing…"),
+            Command::GitPull => self.git.start_pull().map(|()| "git: pulling…"),
+            Command::GitInit => self.git.start_init().map(|()| "git: initializing…"),
+            _ => return,
+        };
+        self.status = match started {
+            Ok(msg) => {
+                if matches!(cmd, Command::GitSync | Command::GitCommit) {
+                    self.git_message_edited = false;
+                }
+                msg.into()
+            }
+            Err(e) => format!("git: {e}"),
+        };
+    }
+
+    /// Commit from the panel, using the drafted message when the user wrote one.
+    fn git_panel_commit(&mut self, sync: bool) {
+        let draft = self.git_message.trim();
+        let message = (self.git_message_edited && !draft.is_empty()).then(|| draft.to_string());
+        let cmd = if sync { Command::GitSync } else { Command::GitCommit };
+        self.start_git(cmd, message);
+    }
+
+    fn set_git_integration(&mut self, enabled: bool, ctx: &egui::Context) {
+        self.persist.git_integration = enabled;
+        self.persist.save();
+        let root = self.vault.as_ref().map(|v| v.root().to_path_buf());
+        self.git.attach(root.as_deref(), enabled, ctx);
+        self.status = format!("git integration {}", if enabled { "on" } else { "off" });
+    }
+
+    /// After a pull: refresh tabs showing pulled files. Tabs with unsaved edits
+    /// keep the editor's text and ask the user instead. Returns how many asked.
+    fn apply_pulled_files(&mut self, files: &[String]) -> usize {
+        let pulled: HashSet<&str> = files.iter().map(String::as_str).collect();
+        let mut asked = 0;
+        for i in 0..self.tabs.len() {
+            let tab = &mut self.tabs[i];
+            if tab.kind == TabKind::Image || !pulled.contains(tab.rel.as_str()) {
+                continue;
+            }
+            if tab.dirty {
+                tab.remote_changed = true;
+                asked += 1;
+            } else {
+                self.reload_tab_from_disk(i);
+            }
+        }
+        self.image_resolver.clear();
+        self.image_rels = None;
+        asked
+    }
+
+    fn reload_tab_from_disk(&mut self, i: usize) {
+        let (Some(vault), Some(tab)) = (self.vault.as_ref(), self.tabs.get_mut(i)) else {
+            return;
+        };
+        match tab.kind {
+            TabKind::Note => {
+                if let Ok(content) = vault.read_note_content(&tab.rel) {
+                    tab.buffer = crate::emoji_util::expand_shortcodes(&content);
+                }
+            }
+            TabKind::Canvas => {
+                if let Ok(doc) = vault.read_canvas(&tab.rel) {
+                    if tab.canvas.as_ref().is_none_or(|b| b.doc != doc) {
+                        tab.canvas = Some(Box::new(CanvasBoard::new(doc)));
+                    }
+                }
+            }
+            TabKind::Image => {}
+        }
+        tab.dirty = false;
+        tab.remote_changed = false;
+    }
+
+    /// Resolve a remote-change prompt: keep the editor text, or take the pulled file.
+    fn settle_remote_change(&mut self, i: usize, keep_mine: bool) {
+        if keep_mine {
+            if let Some(tab) = self.tabs.get_mut(i) {
+                tab.remote_changed = false;
+            }
+            self.mark_dirty(i);
+            self.status = "keeping your version · it will replace the pulled one".into();
+        } else {
+            self.reload_tab_from_disk(i);
+            self.status = "loaded the pulled version".into();
         }
     }
 
@@ -777,6 +1025,11 @@ impl CelestineApp {
                 }
             }
             Command::Save => self.save_active(),
+            Command::GitSync
+            | Command::GitCommit
+            | Command::GitInit
+            | Command::GitPull
+            | Command::GitPanel => self.run_git_command(cmd),
             Command::TogglePreview => self.toggle_preview_mode(),
             Command::Quit => {
                 self.save_all_dirty(false);
@@ -1222,9 +1475,7 @@ impl CelestineApp {
         for r in &mut self.recent_notes {
             *r = remap(r);
         }
-        if let Some(vault) = &self.vault {
-            save_recent_notes(vault, &self.recent_notes);
-        }
+        self.save_open_state();
 
         self.tree_cursor = Some(if is_dir {
             file_tree::TreeNavItem::Dir(new_rel.to_string())
@@ -1318,9 +1569,7 @@ impl CelestineApp {
             list.dedup();
         }
         self.recent_notes.retain(|p| !gone(p));
-        if let Some(vault) = &self.vault {
-            save_recent_notes(vault, &self.recent_notes);
-        }
+        self.save_open_state();
     }
 
     fn nav_go_back(&mut self) {
@@ -1412,16 +1661,40 @@ impl eframe::App for CelestineApp {
                 if changed {
                     self.image_resolver.clear();
                     self.image_rels = None;
+                    self.git.request_refresh(git_sync::SAVE_REFRESH);
                 }
-                self.status = if let Some(error) = vault.watcher_error() {
-                    format!("index refreshed · filesystem polling (watcher: {error})")
-                } else {
-                    "index refreshed".into()
-                };
+                if let Some(error) = vault.watcher_error() {
+                    self.status =
+                        format!("index refreshed · filesystem polling (watcher: {error})");
+                } else if !self.git.recently_reported(std::time::Duration::from_secs(5)) {
+                    self.status = "index refreshed".into();
+                }
             }
             if let Some(delay) = vault.next_fs_poll() {
                 ctx.request_repaint_after(delay);
             }
+        }
+
+        self.git.select_diff(if self.overlay == Overlay::Git {
+            self.git_selected.as_deref()
+        } else {
+            None
+        });
+        let mut asked = 0;
+        for event in self.git.poll() {
+            match event {
+                GitEvent::Message(msg) => self.status = msg,
+                GitEvent::Pulled(files) => asked += self.apply_pulled_files(&files),
+            }
+        }
+        if asked > 0 {
+            self.status = format!(
+                "git: pulled · {asked} open note{} had unsaved edits — choose which version to keep",
+                if asked == 1 { "" } else { "s" }
+            );
+        }
+        if let Some(delay) = self.git.next_wake() {
+            ctx.request_repaint_after(delay);
         }
 
         if self.update_checker.poll() {
@@ -1448,6 +1721,7 @@ impl eframe::App for CelestineApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.save_all_dirty(false);
+        self.save_open_state();
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1674,10 +1948,37 @@ impl eframe::App for CelestineApp {
 
         // Footer cheat strip
         let canvas_hint = self.active_canvas().map(|b| b.tool_hint());
+        let mut git_chip_clicked = false;
         egui::Panel::bottom("foot").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(&self.status).monospace().color(muted));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some(chip) = self.git.chip_text() {
+                        let pending = self.git.last_error().is_some()
+                            || self.git.status().is_some_and(|s| {
+                                !s.changes.is_empty() || s.ahead > 0 || s.behind > 0
+                            });
+                        let color = if pending { accent } else { muted };
+                        let resp = ui
+                            .scope(|ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                let text = naked_button(
+                                    ui,
+                                    RichText::new(chip).monospace().color(color),
+                                );
+                                let icon = crate::icons::button(ui, "git-branch", 13.0, color);
+                                text.union(icon)
+                            })
+                            .inner
+                            .on_hover_text(
+                                self.git.chip_tooltip(
+                                    &self.keymap.display_chord(Command::GitPanel),
+                                    &self.keymap.display_chord(Command::GitSync),
+                                ),
+                            );
+                        git_chip_clicked = resp.clicked();
+                        ui.add_space(12.0);
+                    }
                     let strip = match self.focus {
                         FocusPane::Editor if canvas_hint.is_some() => {
                             canvas_hint.clone().unwrap_or_default()
@@ -1702,6 +2003,9 @@ impl eframe::App for CelestineApp {
                 });
             });
         });
+        if git_chip_clicked {
+            self.run_git_command(Command::GitPanel);
+        }
 
         // Left: files (collapsible like Obsidian)
         if self.persist.show_left_sidebar {
@@ -1738,7 +2042,9 @@ impl eframe::App for CelestineApp {
                             .map(|v| v.list_sidebar_rel_paths())
                             .unwrap_or_default();
                         paths.sort();
-                        let tree = file_tree::build_tree(&paths);
+                        let directories = self.vault.as_ref()
+                            .map(|v| v.list_directory_rel_paths()).unwrap_or_default();
+                        let tree = file_tree::build_tree_with_dirs(&paths, &directories);
                         let active_owned = self.tabs.get(self.active_tab).map(|t| t.rel.clone());
                         let active = active_owned.as_deref();
                         let tree_focused = self.focus == FocusPane::Files;
@@ -1985,6 +2291,35 @@ impl eframe::App for CelestineApp {
                 let rel = self.tabs[tab_idx].rel.clone();
                 let md_font = self.persist.editor_font_size;
 
+                if self.tabs[tab_idx].remote_changed {
+                    let mut choice = None;
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(
+                                "This note changed on the remote while you were editing.",
+                            )
+                            .size(12.5)
+                            .color(accent),
+                        );
+                        if naked_button(ui, RichText::new("keep mine").size(12.5).color(accent))
+                            .on_hover_text("Keep the editor's text; it replaces the pulled version")
+                            .clicked()
+                        {
+                            choice = Some(true);
+                        }
+                        if naked_button(ui, RichText::new("load remote").size(12.5).color(muted))
+                            .on_hover_text("Discard unsaved edits and show the pulled file")
+                            .clicked()
+                        {
+                            choice = Some(false);
+                        }
+                    });
+                    ui.add_space(4.0);
+                    if let Some(keep_mine) = choice {
+                        self.settle_remote_change(tab_idx, keep_mine);
+                    }
+                }
+
                 if tab_kind == TabKind::Image {
                     self.editor_focus_pending = false;
                     ui.horizontal(|ui| {
@@ -2010,7 +2345,7 @@ impl eframe::App for CelestineApp {
                             .show(ui, |ui| {
                                 ui.set_min_size(egui::vec2(fill_w, fill_h));
                                 self.image_resolver.set_context(vault.root(), &rel, "");
-                                if let Some(image) = self.image_resolver.resolve(&rel, &[]) {
+                                if let Some(image) = self.image_resolver.resolve(&format!("wikilink:{rel}"), &[]) {
                                     crate::media::show_standalone(ui, &image.abs, muted);
                                 } else {
                                     ui.centered_and_justified(|ui| {
@@ -2211,6 +2546,8 @@ impl eframe::App for CelestineApp {
                             link: None,
                             heading_rects: vec![],
                             find_scrolled: false,
+                            task_toggle: None,
+                            image_resize: None,
                         }
                     };
                     if scroll_heading.is_some() {
@@ -2230,12 +2567,23 @@ impl eframe::App for CelestineApp {
                             }
                         }
                     }
+                    if let Some(toggle) = outcome.task_toggle {
+                        self.toggle_preview_task(tab_idx, &body, toggle);
+                    }
+                    if let Some(edit) = outcome.image_resize {
+                        self.resize_preview_image(tab_idx, &body, edit, &ctx);
+                    }
                     if let Some(link) = outcome.link {
                         self.follow_link(link, &ctx);
                     }
                 } else {
                     let font = FontId::monospace(md_font);
                     let text_id = self.tabs[tab_idx].editor_text_id;
+                    self.prepare_image_pastes(tab_idx, &ctx);
+                    if let Some(vault) = &self.vault {
+                        self.image_resolver.set_context(vault.root(), &rel, "editor");
+                        self.image_rels.get_or_insert_with(|| vault.list_image_rel_paths());
+                    }
                     let jump_char_direct = self.tabs[tab_idx].scroll_to_char.take();
                     let jump_line = self.tabs[tab_idx].scroll_to_line.take();
                     let jump_heading = self.tabs[tab_idx].scroll_to_heading.take();
@@ -2396,6 +2744,7 @@ impl eframe::App for CelestineApp {
                                                 } else {
                                                     seg_lines
                                                 };
+                                                let mut inline_images = Vec::new();
                                                 let mut layouter = |ui: &egui::Ui,
                                                                     text: &dyn egui::TextBuffer,
                                                                     wrap_width: f32| {
@@ -2407,7 +2756,7 @@ impl eframe::App for CelestineApp {
                                                     } else {
                                                         text_w
                                                     };
-                                                    md_edit::layout(
+                                                    let galley = md_edit::layout(
                                                         ui,
                                                         text,
                                                         w,
@@ -2416,7 +2765,14 @@ impl eframe::App for CelestineApp {
                                                         muted,
                                                         accent,
                                                         &headings,
-                                                    )
+                                                    );
+                                                    let (galley, images) = crate::inline_images::layout(
+                                                        ui, text, galley, w, &mut self.image_resolver,
+                                                        self.image_rels.as_deref().unwrap_or(&[]),
+                                                        text_id.with(("seg", si)),
+                                                    );
+                                                    inline_images = images;
+                                                    galley
                                                 };
                                                 let te = TextEdit::multiline(text)
                                                     .id(text_id.with(("seg", si)))
@@ -2427,6 +2783,14 @@ impl eframe::App for CelestineApp {
                                                     .interactive(editor_live)
                                                     .layouter(&mut layouter);
                                                 let mut out = te.show(ui);
+                                                if let Some(edit) = crate::inline_images::paint(ui, out.galley_pos, &inline_images, editor_live && self.overlay == Overlay::None) {
+                                                    if crate::image_size::apply_in_editor(text, &edit, &mut out.state) {
+                                                        out.response.request_focus();
+                                                        out.state.clone().store(ui.ctx(), out.response.id);
+                                                        any_changed = true;
+                                                        ctx.request_repaint();
+                                                    }
+                                                }
                                                 if out.response.changed() {
                                                     any_changed = true;
                                                 }
@@ -2792,6 +3156,7 @@ impl CelestineApp {
             Overlay::RecentVaults => {
                 format!("recent {}", self.keymap.display_chord(Command::RecentVaults))
             }
+            Overlay::Git => format!("git {}", self.keymap.display_chord(Command::GitPanel)),
             Overlay::None => return,
         };
 
@@ -2843,6 +3208,7 @@ impl CelestineApp {
                     match self.overlay {
                         Overlay::Shortcuts => self.ui_shortcuts(ui, muted, list_h),
                         Overlay::Settings => self.ui_settings(ui, ctx, accent, muted),
+                        Overlay::Git => self.ui_git_panel(ui, accent, muted, list_h),
                         Overlay::ThemePicker => self.ui_theme_picker(ui, ctx, accent, muted, list_h),
                         Overlay::RecentVaults => {
                             self.ui_recent_vaults(ui, ctx, accent, muted, list_h)
@@ -2898,6 +3264,23 @@ impl CelestineApp {
                 self.overlay = Overlay::None;
             }
             ui.add_space(10.0);
+            if let Some(vault) = &self.vault {
+                ui.label(RichText::new("IMAGE FOLDER · THIS VAULT").size(11.0).strong().color(muted));
+                ui.horizontal(|ui| {
+                    ui.text_edit_singleline(&mut self.images_folder_draft);
+                    if naked_button(ui, RichText::new("save").color(accent)).clicked() {
+                        match crate::image_paste::Settings::save_folder(vault, &self.images_folder_draft) {
+                            Ok(settings) => {
+                                self.images_folder_draft = settings.images_folder;
+                                self.status = "image folder saved".into();
+                            }
+                            Err(e) => self.status = format!("image folder: {e}"),
+                        }
+                    }
+                });
+                ui.label(RichText::new("relative to the vault · applies to future pasted images").size(10.0).color(muted));
+                ui.add_space(10.0);
+            }
             ui.label(RichText::new("UI FONT").size(11.0).strong().color(muted));
             ui.horizontal(|ui| {
                 if naked_button(ui, RichText::new("−").color(accent)).clicked() {
@@ -2987,6 +3370,49 @@ impl CelestineApp {
                 }
             });
             ui.add_space(10.0);
+            ui.label(RichText::new("GIT").size(11.0).strong().color(muted));
+            ui.horizontal(|ui| {
+                let on = self.persist.git_integration;
+                if sidebar_toggle(ui, "git integration", on, accent, muted).clicked() {
+                    self.set_git_integration(!on, ctx);
+                }
+            });
+            if self.persist.git_integration && self.vault.is_some() {
+                if self.git.git_missing() {
+                    ui.label(RichText::new("git not found on PATH").color(muted));
+                } else if let Some(s) = self.git.status() {
+                    let branch = s.branch.as_deref().unwrap_or("detached HEAD");
+                    let remote = s.upstream.as_deref().unwrap_or("no upstream yet");
+                    ui.label(RichText::new(format!("{branch} → {remote}")).color(muted));
+                    if naked_button(
+                        ui,
+                        RichText::new(format!(
+                            "sync now {}",
+                            self.keymap.display_chord(Command::GitSync)
+                        ))
+                        .color(accent),
+                    )
+                    .clicked()
+                    {
+                        self.run_git_command(Command::GitSync);
+                    }
+                } else if self.git.can_init() {
+                    ui.label(RichText::new("this vault is not a git repository").color(muted));
+                    if naked_button(ui, RichText::new("initialize repository").color(accent))
+                        .clicked()
+                    {
+                        self.run_git_command(Command::GitInit);
+                    }
+                }
+            }
+            ui.label(
+                RichText::new(
+                    "only appears for vaults that are a repository root · uses your git credentials",
+                )
+                .size(10.0)
+                .color(muted.gamma_multiply(0.75)),
+            );
+            ui.add_space(10.0);
             ui.label(RichText::new("THEME").size(11.0).strong().color(muted));
             if naked_button(ui, RichText::new("choose theme…").color(accent)).clicked() {
                 self.open_overlay(Overlay::ThemePicker);
@@ -3002,6 +3428,279 @@ impl CelestineApp {
             ui.label(
                 RichText::new("edit ~/.config/celestine/keybindings.toml to remap").color(muted),
             );
+        }
+    }
+
+    fn ui_git_panel(
+        &mut self,
+        ui: &mut Ui,
+        accent: egui::Color32,
+        muted: egui::Color32,
+        list_h: f32,
+    ) {
+        use celestine_core::git::{ChangeKind, DiffLineKind};
+        let palette = theme_apply::ThemePalette::from_tokens(&self.theme);
+        let error_c = theme_apply::mix(palette.text, egui::Color32::from_rgb(230, 80, 80), 0.65);
+
+        let Some(status) = self.git.status().cloned() else {
+            if self.git.git_missing() {
+                ui.label(RichText::new("git is not installed (not found on PATH)").color(muted));
+            } else if self.git.can_init() {
+                ui.label(RichText::new("this vault is not a git repository").color(muted));
+                if naked_button(ui, RichText::new("initialize repository").color(accent)).clicked()
+                {
+                    self.run_git_command(Command::GitInit);
+                }
+            } else {
+                ui.label(RichText::new("reading repository…").color(muted));
+            }
+            return;
+        };
+        let working = self.git.is_working();
+
+        // Header: branch, upstream, ahead/behind, pull + sync.
+        let mut want_pull = false;
+        let mut want_sync = false;
+        ui.horizontal(|ui| {
+            let branch = status.branch.as_deref().unwrap_or("detached HEAD");
+            let upstream = status.upstream.as_deref().unwrap_or("not published yet");
+            ui.label(RichText::new(format!("{branch} → {upstream}")).monospace().color(palette.text));
+            let ab = git_sync::ahead_behind(&status);
+            if !ab.is_empty() {
+                ui.label(RichText::new(ab).monospace().color(accent));
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_enabled_ui(!working, |ui| {
+                    want_sync = naked_button(ui, RichText::new("sync").color(accent))
+                        .on_hover_text(format!(
+                            "commit, pull, push {}",
+                            self.keymap.display_chord(Command::GitSync)
+                        ))
+                        .clicked();
+                    want_pull = naked_button(ui, RichText::new("pull").color(muted))
+                        .on_hover_text("pull with rebase; uncommitted edits are kept")
+                        .clicked();
+                });
+            });
+        });
+
+        // Last result (persists; the status bar moves on).
+        if let Some(label) = self.git.working_label() {
+            ui.label(RichText::new(label).size(11.5).color(accent));
+        } else if let Some((age, result)) = self.git.last_result() {
+            let (text, color) = match result {
+                Ok(m) => (m, muted),
+                Err(e) => (e, error_c),
+            };
+            let text = text.strip_prefix("git: ").unwrap_or(text);
+            ui.label(
+                RichText::new(format!("{text} · {}", git_sync::format_age(age)))
+                    .size(11.5)
+                    .color(color),
+            );
+        }
+        ui.add_space(4.0);
+
+        // Changed files.
+        let changes = &status.changes;
+        if self
+            .git_selected
+            .as_ref()
+            .is_none_or(|sel| !changes.iter().any(|c| &c.rel == sel))
+        {
+            self.git_selected = changes.first().map(|c| c.rel.clone());
+        }
+        let message_id = egui::Id::new("celestine-git-message");
+        let typing = ui.ctx().memory(|m| m.has_focus(message_id));
+        let mut open_rel = None;
+        if !typing && !changes.is_empty() {
+            let pos = changes
+                .iter()
+                .position(|c| Some(&c.rel) == self.git_selected.as_ref())
+                .unwrap_or(0);
+            let next = if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                Some((pos + 1).min(changes.len() - 1))
+            } else if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                Some(pos.saturating_sub(1))
+            } else {
+                None
+            };
+            if let Some(n) = next {
+                self.git_selected = Some(changes[n].rel.clone());
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                open_rel = self.git_selected.clone();
+            }
+        }
+
+        ui.label(
+            RichText::new(format!("CHANGES ({})", changes.len()))
+                .size(11.0)
+                .strong()
+                .color(muted),
+        );
+        let files_h = (list_h * 0.24).max(80.0);
+        ScrollArea::vertical()
+            .id_salt("git-files")
+            .max_height(files_h)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                if changes.is_empty() {
+                    ui.label(RichText::new("no uncommitted changes").color(muted));
+                }
+                for c in changes {
+                    let selected = Some(&c.rel) == self.git_selected.as_ref();
+                    let color = match c.kind {
+                        ChangeKind::Conflicted => error_c,
+                        _ if selected => accent,
+                        _ => palette.text,
+                    };
+                    let path = match &c.orig_rel {
+                        Some(orig) => format!("{orig} → {}", c.rel),
+                        None => c.rel.clone(),
+                    };
+                    let resp = ui.selectable_label(
+                        selected,
+                        RichText::new(format!("{}  {path}", c.kind.letter()))
+                            .monospace()
+                            .size(12.5)
+                            .color(color),
+                    );
+                    if selected && (resp.changed() || ui.input(|i| {
+                        i.key_pressed(egui::Key::ArrowDown) || i.key_pressed(egui::Key::ArrowUp)
+                    })) {
+                        resp.scroll_to_me(None);
+                    }
+                    if resp.clicked() {
+                        self.git_selected = Some(c.rel.clone());
+                    }
+                    if resp.double_clicked() {
+                        open_rel = Some(c.rel.clone());
+                    }
+                }
+            });
+        ui.add_space(4.0);
+
+        // Diff of the selected file.
+        let diff_h = (list_h * 0.46).max(140.0);
+        egui::Frame::NONE
+            .fill(palette.content_bg)
+            .inner_margin(egui::Margin::same(6))
+            .corner_radius(4.0)
+            .show(ui, |ui| {
+                ScrollArea::both()
+                    .id_salt("git-diff")
+                    .max_height(diff_h)
+                    .min_scrolled_height(diff_h)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        let note = |ui: &mut Ui, text: &str| {
+                            ui.label(RichText::new(text).monospace().size(12.0).color(muted));
+                        };
+                        if self.git_selected.is_none() {
+                            note(ui, "nothing to show");
+                            return;
+                        }
+                        match self.git.diff() {
+                            None => note(ui, "loading diff…"),
+                            Some(Err(e)) => note(ui, e),
+                            Some(Ok(d)) if d.binary => note(ui, "binary file changed"),
+                            Some(Ok(d)) if d.lines.is_empty() => note(ui, "no content changes"),
+                            Some(Ok(d)) => {
+                                let font = FontId::monospace(12.0);
+                                let mut job = egui::text::LayoutJob::default();
+                                job.wrap.max_width = f32::INFINITY;
+                                for line in &d.lines {
+                                    let (prefix, color, bg) = match line.kind {
+                                        DiffLineKind::Added => ("+", palette.text, palette.diff_add),
+                                        DiffLineKind::Removed => ("-", palette.text, palette.diff_del),
+                                        DiffLineKind::Context => (" ", muted, egui::Color32::TRANSPARENT),
+                                        DiffLineKind::Hunk => ("", accent, egui::Color32::TRANSPARENT),
+                                        DiffLineKind::Meta => ("", muted, egui::Color32::TRANSPARENT),
+                                    };
+                                    job.append(
+                                        &format!("{prefix}{}\n", line.text),
+                                        0.0,
+                                        egui::TextFormat {
+                                            font_id: font.clone(),
+                                            color,
+                                            background: bg,
+                                            ..Default::default()
+                                        },
+                                    );
+                                }
+                                ui.label(job);
+                                if d.truncated {
+                                    note(ui, "… diff truncated");
+                                }
+                            }
+                        }
+                    });
+            });
+        ui.add_space(6.0);
+
+        // Commit message + actions.
+        ui.label(RichText::new("COMMIT MESSAGE").size(11.0).strong().color(muted));
+        if !self.git_message_edited {
+            self.git_message = self.git.suggested_message();
+        }
+        let commit_key = ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter));
+        let resp = ui.add(
+            TextEdit::multiline(&mut self.git_message)
+                .id(message_id)
+                .desired_rows(2)
+                .desired_width(f32::INFINITY)
+                .font(FontId::monospace(12.5))
+                .hint_text("describe your changes"),
+        );
+        if resp.changed() {
+            self.git_message_edited = true;
+        }
+        let mut want_commit = commit_key;
+        let mut want_commit_sync = false;
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(!working && !changes.is_empty(), |ui| {
+                want_commit |= naked_button(
+                    ui,
+                    RichText::new(format!(
+                        "commit {}",
+                        crate::keybinds::pretty_chord("Mod+Enter")
+                    ))
+                    .color(accent),
+                )
+                .clicked();
+                want_commit_sync = naked_button(ui, RichText::new("commit and sync").color(accent))
+                    .clicked();
+            });
+            if self.git_message_edited
+                && naked_button(ui, RichText::new("reset message").size(11.5).color(muted))
+                    .on_hover_text("go back to the generated message")
+                    .clicked()
+            {
+                self.git_message_edited = false;
+            }
+        });
+
+        let has_changes = !changes.is_empty();
+        if let Some(rel) = open_rel {
+            let deleted = changes.iter().any(|c| c.rel == rel && c.kind == ChangeKind::Deleted);
+            if !deleted {
+                self.overlay = Overlay::None;
+                self.open_path(&rel, true);
+                return;
+            }
+        }
+        if working {
+            return;
+        }
+        if want_commit_sync && has_changes {
+            self.git_panel_commit(true);
+        } else if want_commit && has_changes {
+            self.git_panel_commit(false);
+        } else if want_sync {
+            self.git_panel_commit(true);
+        } else if want_pull {
+            self.run_git_command(Command::GitPull);
         }
     }
 
@@ -3568,8 +4267,25 @@ impl CelestineApp {
                     Command::FocusOutline,
                     Command::NextTab,
                     Command::PrevTab,
+                    Command::GitPanel,
+                    Command::GitSync,
+                    Command::GitCommit,
+                    Command::GitPull,
+                    Command::GitInit,
                 ];
+                let git_on = self.vault.is_some() && self.persist.git_integration;
+                let has_repo = self.git.repo().is_some();
                 for c in cmds {
+                    let offered = match c {
+                        Command::GitSync | Command::GitCommit | Command::GitPull | Command::GitPanel => {
+                            git_on && has_repo
+                        }
+                        Command::GitInit => git_on && self.git.can_init(),
+                        _ => true,
+                    };
+                    if !offered {
+                        continue;
+                    }
                     let label = format!("{}  {}", c.label(), self.keymap.display_chord(c));
                     let score = if empty_q {
                         Some(0)
@@ -3682,26 +4398,43 @@ fn overlay_scroll_list(ui: &mut Ui, list_h: f32, add_contents: impl FnOnce(&mut 
     );
 }
 
-fn load_recent_notes(vault: &Vault) -> Vec<String> {
+fn restorable_path(vault: &Vault, rel: &str) -> bool {
+    let supported = rel.to_ascii_lowercase().ends_with(".md")
+        || crate::media::is_image_rel(rel)
+        || is_canvas_rel(rel);
+    supported && vault.abs_path(rel).is_ok_and(|path| path.is_file())
+}
+
+fn file_to_restore(vault: &Vault, recent: &[String], last_open: Option<&str>) -> Option<String> {
+    last_open
+        .or_else(|| recent.first().map(String::as_str))
+        .filter(|rel| restorable_path(vault, rel))
+        .map(str::to_owned)
+}
+
+fn load_recent_notes(vault: &Vault) -> (Vec<String>, Option<String>) {
     #[derive(serde::Deserialize, Default)]
     struct File {
         #[serde(default)]
         notes: Vec<String>,
+        #[serde(default)]
+        last_open: Option<String>,
     }
     let Ok(text) = vault.read_metadata("recent-notes.toml") else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
     toml::from_str::<File>(&text)
-        .map(|f| f.notes)
+        .map(|f| (f.notes, f.last_open))
         .unwrap_or_default()
 }
 
-fn save_recent_notes(vault: &Vault, notes: &[String]) {
+fn save_recent_notes(vault: &Vault, notes: &[String], last_open: &str) {
     #[derive(serde::Serialize)]
     struct File<'a> {
         notes: &'a [String],
+        last_open: &'a str,
     }
-    if let Ok(body) = toml::to_string_pretty(&File { notes }) {
+    if let Ok(body) = toml::to_string_pretty(&File { notes, last_open }) {
         let _ = vault.write_metadata("recent-notes.toml", &body);
     }
 }
@@ -3722,12 +4455,35 @@ mod recent_notes_boundary_tests {
         symlink(outside.path(), vault.path().join(".celestine")).unwrap();
 
         let vault = Vault::open(vault.path()).unwrap();
-        assert!(load_recent_notes(&vault).is_empty());
-        save_recent_notes(&vault, &["inside.md".to_string()]);
+        assert!(load_recent_notes(&vault).0.is_empty());
+        save_recent_notes(&vault, &["inside.md".to_string()], "inside.md");
         assert_eq!(
             std::fs::read_to_string(sentinel).unwrap(),
             "notes = [\"outside-secret.md\"]\n"
         );
+    }
+}
+
+#[cfg(test)]
+mod restore_file_tests {
+    use super::*;
+
+    #[test]
+    fn restores_last_open_file_and_preserves_intentionally_empty_editor() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("A.md"), "# A").unwrap();
+        std::fs::write(dir.path().join("Home.md"), "# Home").unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
+        let recent = vec!["A.md".to_string(), "Home.md".to_string()];
+
+        assert_eq!(
+            file_to_restore(&vault, &recent, Some("Home.md")),
+            Some("Home.md".into())
+        );
+        assert_eq!(file_to_restore(&vault, &recent, None), Some("A.md".into()));
+        assert_eq!(file_to_restore(&vault, &recent, Some("")), None);
+        assert_eq!(file_to_restore(&vault, &[], None), None);
+        assert_eq!(file_to_restore(&vault, &recent, Some("missing.md")), None);
     }
 }
 
@@ -4227,6 +4983,11 @@ fn cmd_from_id(id: &str) -> Option<Command> {
         "reveal_in_tree" => Command::RevealInTree,
         "next_tab" => Command::NextTab,
         "prev_tab" => Command::PrevTab,
+        "git_sync" => Command::GitSync,
+        "git_commit" => Command::GitCommit,
+        "git_init" => Command::GitInit,
+        "git_panel" => Command::GitPanel,
+        "git_pull" => Command::GitPull,
         _ => return None,
     })
 }
@@ -4276,9 +5037,136 @@ mod note_open_boundary_tests {
             update_banner_hidden: false,
             image_resolver: crate::media::ImageResolver::default(),
             image_rels: None,
+            images_folder_draft: "images".into(),
             line_flash: None,
             autosave_at: None,
+            git: VaultGit::default(),
+            git_selected: None,
+            git_message: String::new(),
+            git_message_edited: false,
         }
+    }
+
+    #[test]
+    fn preview_checkbox_changes_are_autosaved_with_frontmatter_intact() {
+        let root = tempfile::tempdir().unwrap();
+        let original = "---\r\ntitle: Tasks\r\n---\r\n- [ ] Ship it\r\n";
+        std::fs::write(root.path().join("Tasks.md"), original).unwrap();
+        let mut app = test_app(Vault::open(root.path()).unwrap());
+        app.open_note("Tasks.md", false);
+        let body = extract_note_data(&app.tabs[0].buffer).body;
+        app.toggle_preview_task(
+            0,
+            &body,
+            preview::TaskToggle {
+                marker_offset: 2,
+                checked: false,
+            },
+        );
+        assert!(app.tabs[0].dirty);
+        app.autosave_at = Some(Instant::now());
+        app.flush_autosave_if_due(&egui::Context::default());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("Tasks.md")).unwrap(),
+            original.replacen("[ ]", "[x]", 1)
+        );
+        assert!(!app.tabs[0].dirty);
+    }
+
+    #[test]
+    fn preview_image_resize_preserves_frontmatter_other_embeds_and_autosaves() {
+        let root = tempfile::tempdir().unwrap();
+        let original = "---\r\ntitle: Resize\r\n---\r\n\r\n文 :smile: [[Other|alias]]\r\n\r\n| A | B |\r\n| --- | --- |\r\n| 1 | 2 |\r\n\r\n![first|100](image.png)\r\n![[image.png|caption|200x100]]\r\n";
+        std::fs::write(root.path().join("Note.md"), original).unwrap();
+        let mut app = test_app(Vault::open(root.path()).unwrap());
+        app.open_note("Note.md", false);
+        app.tabs[0].preview_mode = true;
+        app.tabs[0].buffer = original.to_owned();
+        let body = extract_note_data(original).body;
+        let edit = crate::image_size::ResizeEdit {
+            embed: crate::image_size::embeds(&body).remove(1),
+            size: Some(crate::image_size::ImageSize { width: 320, height: Some(160) }),
+        };
+        let ctx = egui::Context::default();
+        app.resize_preview_image(0, &body, edit, &ctx);
+        let expected = original.replace("200x100", "320x160");
+        assert_eq!(app.tabs[0].buffer, expected);
+        assert!(app.tabs[0].dirty);
+        app.autosave_at = Some(Instant::now());
+        app.flush_autosave_if_due(&ctx);
+        assert_eq!(std::fs::read_to_string(root.path().join("Note.md")).unwrap(), expected);
+        let body = extract_note_data(&expected).body;
+        let reset = crate::image_size::ResizeEdit { embed: crate::image_size::embeds(&body).remove(1), size: None };
+        app.resize_preview_image(0, &body, reset, &ctx);
+        assert_eq!(app.tabs[0].buffer, original.replace("|200x100", ""));
+    }
+
+    #[test]
+    fn image_paste_replaces_selection_saves_and_undoes_through_text_edit() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("notes")).unwrap();
+        std::fs::write(root.path().join("notes/Note.md"), "α select ω").unwrap();
+        let mut app = test_app(Vault::open(root.path()).unwrap());
+        app.open_note("notes/Note.md", false);
+        let ctx = egui::Context::default();
+        let id = app.tabs[0].editor_text_id.with(("seg", 0usize));
+        let mut out = ctx.run_ui(Default::default(), |ui| {
+            let mut output = TextEdit::multiline(&mut app.tabs[0].buffer).id(id).show(ui);
+            output.response.request_focus();
+            output.state.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(2), CCursor::new(8))));
+            output.state.store(ui.ctx(), id);
+        });
+        out.textures_delta.clear();
+        let image = std::sync::Arc::new(egui::ColorImage::filled([2, 1], egui::Color32::RED));
+        let input = egui::RawInput { time: Some(2.0), events: vec![egui::Event::PasteImage(image)], ..Default::default() };
+        let mut out = ctx.run_ui(input, |ui| {
+            app.prepare_image_pastes(0, ui.ctx());
+            let out = TextEdit::multiline(&mut app.tabs[0].buffer).id(id).show(ui);
+            if out.response.changed() { app.mark_dirty(0); }
+        });
+        out.textures_delta.clear();
+        let images = app.vault.as_ref().unwrap().list_image_rel_paths();
+        assert_eq!(images.len(), 1);
+        assert!(images[0].starts_with("images/pasted-image-"));
+        let expected = format!("α {} ω", crate::image_paste::embed("notes/Note.md", &images[0]));
+        assert_eq!(app.tabs[0].buffer, expected);
+        assert!(app.tabs[0].dirty);
+        app.autosave_at = Some(Instant::now());
+        app.flush_autosave_if_due(&ctx);
+        assert_eq!(std::fs::read_to_string(root.path().join("notes/Note.md")).unwrap(), expected);
+        let input = egui::RawInput {
+            time: Some(3.0), events: vec![egui::Event::Key { key: egui::Key::Z, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND }],
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| {
+            TextEdit::multiline(&mut app.tabs[0].buffer).id(id).show(ui);
+        });
+        out.textures_delta.clear();
+        assert_eq!(app.tabs[0].buffer, "α select ω");
+        assert!(root.path().join(&images[0]).is_file());
+    }
+
+    #[test]
+    fn image_paste_failure_and_non_note_focus_leave_note_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("Note.md"), "keep me").unwrap();
+        let mut app = test_app(Vault::open(root.path()).unwrap());
+        app.open_note("Note.md", false);
+        let ctx = egui::Context::default();
+        let id = app.tabs[0].editor_text_id.with(("seg", 0usize));
+        let image = std::sync::Arc::new(egui::ColorImage::filled([1, 1], egui::Color32::WHITE));
+        for overlay in [Overlay::Settings, Overlay::None] {
+            app.overlay = overlay;
+            std::fs::write(root.path().join("images"), "blocked").unwrap();
+            let mut out = ctx.run_ui(egui::RawInput { events: vec![egui::Event::PasteImage(image.clone())], ..Default::default() }, |ui| {
+                ui.memory_mut(|m| m.request_focus(id));
+                app.prepare_image_pastes(0, ui.ctx());
+            });
+            out.textures_delta.clear();
+            assert_eq!(app.tabs[0].buffer, "keep me");
+            assert!(app.vault.as_ref().unwrap().list_image_rel_paths().is_empty());
+        }
+        assert!(app.status.starts_with("image paste failed:"), "{}", app.status);
     }
 
     #[test]
@@ -4343,6 +5231,9 @@ mod note_open_boundary_tests {
             "close must flush dirty buffer, got {on_disk:?}"
         );
         assert!(app.tabs.is_empty());
+        let (recent, last_open) = load_recent_notes(app.vault.as_ref().unwrap());
+        assert_eq!(recent, vec!["Note.md"]);
+        assert_eq!(last_open.as_deref(), Some(""));
     }
 }
 
@@ -4373,8 +5264,101 @@ mod tests {
         &app.tabs[app.active_tab].rel
     }
 
+    #[test]
+    fn git_panel_renders_changes_and_diff_headless() {
+        if !celestine_core::git::git_available() {
+            return;
+        }
+        let (dir, mut app) = app_with_notes(&["Ideas.md"]);
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["init", "--quiet"])
+            .status()
+            .unwrap();
+        let ctx = egui::Context::default();
+        app.git.attach(Some(dir.path()), true, &ctx);
+        app.overlay = Overlay::Git;
+        let deadline = Instant::now() + std::time::Duration::from_secs(20);
+        while app.git.diff().is_none() {
+            assert!(Instant::now() < deadline, "diff never loaded");
+            app.git.select_diff(app.git_selected.as_deref());
+            app.git.poll();
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                app.draw_overlay(ui.ctx(), egui::Color32::WHITE, egui::Color32::GRAY);
+            });
+            out.textures_delta.clear();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(app.git_selected.as_deref(), Some("Ideas.md"));
+        assert_eq!(app.git_message, "Add Ideas");
+        let diff = app.git.diff().unwrap().as_ref().unwrap();
+        assert!(diff.lines.iter().any(|l| l.text == "# Ideas.md"));
+    }
+
+    #[test]
+    fn pulled_files_reload_clean_tabs_and_hold_dirty_ones() {
+        let (dir, mut app) = app_with_notes(&["Clean.md", "Busy.md", "Other.md"]);
+        app.open_note("Clean.md", false);
+        app.open_note("Busy.md", false);
+        app.open_note("Other.md", false);
+        let busy = app.tabs.iter().position(|t| t.rel == "Busy.md").unwrap();
+        app.tabs[busy].buffer = "my unsaved edit".into();
+        app.mark_dirty(busy);
+
+        std::fs::write(dir.path().join("Clean.md"), "pulled clean").unwrap();
+        std::fs::write(dir.path().join("Busy.md"), "pulled busy").unwrap();
+        let asked = app.apply_pulled_files(&["Clean.md".into(), "Busy.md".into()]);
+        assert_eq!(asked, 1);
+        let tab = |app: &CelestineApp, rel: &str| {
+            app.tabs.iter().position(|t| t.rel == rel).unwrap()
+        };
+        assert_eq!(app.tabs[tab(&app, "Clean.md")].buffer, "pulled clean");
+        assert!(app.tabs[busy].remote_changed);
+
+        // Autosave leaves the held tab alone, so the pulled file survives.
+        app.save_settled_tabs();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("Busy.md")).unwrap(),
+            "pulled busy"
+        );
+
+        app.settle_remote_change(busy, false);
+        assert_eq!(app.tabs[busy].buffer, "pulled busy");
+        assert!(!app.tabs[busy].dirty && !app.tabs[busy].remote_changed);
+
+        // Keep mine: the editor text is written over the pulled file.
+        app.tabs[busy].buffer = "second edit".into();
+        app.mark_dirty(busy);
+        std::fs::write(dir.path().join("Busy.md"), "pulled again").unwrap();
+        app.apply_pulled_files(&["Busy.md".into()]);
+        app.settle_remote_change(busy, true);
+        app.save_settled_tabs();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("Busy.md")).unwrap(),
+            "second edit"
+        );
+    }
+
     fn vault_rels(app: &CelestineApp) -> Vec<String> {
         app.vault.as_ref().unwrap().list_md_rel_paths()
+    }
+
+    #[test]
+    fn saved_active_tab_takes_priority_over_recent_open_order() {
+        let (_dir, mut app) = app_with_notes(&["A.md", "B.md"]);
+        app.open_note("A.md", false);
+        app.open_note("B.md", false);
+        app.active_tab = 0;
+        app.save_open_state();
+
+        let vault = app.vault.as_ref().unwrap();
+        let (recent, last_open) = load_recent_notes(vault);
+        assert_eq!(recent, vec!["B.md", "A.md"]);
+        assert_eq!(
+            file_to_restore(vault, &recent, last_open.as_deref()),
+            Some("A.md".into())
+        );
     }
 
     #[test]

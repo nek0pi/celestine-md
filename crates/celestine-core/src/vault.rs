@@ -529,6 +529,24 @@ impl Vault {
         Ok(())
     }
 
+    /// Visible directories, including empty ones, for the files sidebar.
+    pub fn list_directory_rel_paths(&self) -> Vec<String> {
+        let mut dirs = Vec::new();
+        for entry in WalkDir::new(&self.root)
+            .min_depth(1)
+            .into_iter()
+            .filter_entry(|entry| is_visible_path(&self.root, entry.path()))
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_dir())
+        {
+            if let Ok(rel) = checked_rel(&self.root, entry.path()) {
+                dirs.push(rel);
+            }
+        }
+        dirs.sort();
+        dirs
+    }
+
     /// Notes, images and canvases for the files sidebar.
     pub fn list_sidebar_rel_paths(&self) -> Vec<String> {
         let mut v = self.list_md_rel_paths();

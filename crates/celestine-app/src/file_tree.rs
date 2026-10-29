@@ -27,7 +27,17 @@ fn insert_path(root: &mut DirNode, rel: &str) {
 }
 
 pub fn build_tree(paths: &[String]) -> DirNode {
+    build_tree_with_dirs(paths, &[])
+}
+
+pub fn build_tree_with_dirs(paths: &[String], directories: &[String]) -> DirNode {
     let mut root = DirNode::default();
+    for dir in directories {
+        let mut node = &mut root;
+        for part in dir.split('/').filter(|p| !p.is_empty()) {
+            node = node.dirs.entry(part.to_owned()).or_default();
+        }
+    }
     for p in paths {
         insert_path(&mut root, p);
     }
@@ -702,6 +712,28 @@ pub fn save_folder_icons(vault: &celestine_core::Vault, icons: &HashMap<String, 
 #[cfg(test)]
 mod tree_move_tests {
     use super::*;
+
+    #[test]
+    fn empty_directories_are_real_tree_nodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = celestine_core::Vault::open(dir.path()).unwrap();
+        vault.create_folder("Parent/New folder").unwrap();
+        vault.create_folder(".hidden/skip").unwrap();
+        let paths = vault.list_sidebar_rel_paths();
+        let directories = vault.list_directory_rel_paths();
+        assert_eq!(directories, ["Parent", "Parent/New folder"]);
+        let tree = build_tree_with_dirs(&paths, &directories);
+        let child = &tree.dirs["Parent"].dirs["New folder"];
+        assert!(child.dirs.is_empty());
+        assert!(child.files.is_empty());
+        vault.rename_entry("Parent/New folder", "Parent/Renamed").unwrap();
+        let tree = build_tree_with_dirs(&paths, &vault.list_directory_rel_paths());
+        assert!(tree.dirs["Parent"].dirs.contains_key("Renamed"));
+        assert!(!tree.dirs["Parent"].dirs.contains_key("New folder"));
+        vault.delete_entry("Parent/Renamed").unwrap();
+        let tree = build_tree_with_dirs(&paths, &vault.list_directory_rel_paths());
+        assert!(tree.dirs["Parent"].dirs.is_empty());
+    }
 
     #[test]
     fn move_file_into_folder() {

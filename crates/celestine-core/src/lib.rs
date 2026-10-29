@@ -2,6 +2,7 @@
 
 pub mod canvas;
 mod error;
+pub mod git;
 mod graph;
 mod index;
 mod path;

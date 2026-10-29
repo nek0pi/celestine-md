@@ -134,6 +134,7 @@ fn resolve_image_uncached(
     dest: &str,
     known_image_rels: &[String],
 ) -> Option<ResolvedImage> {
+    let is_wikilink = dest.trim().starts_with("wikilink:");
     let dest = dest.trim().strip_prefix("wikilink:").unwrap_or(dest.trim());
     if dest.is_empty()
         || dest.starts_with("http://")
@@ -142,6 +143,13 @@ fn resolve_image_uncached(
     {
         return None;
     }
+    let decoded;
+    let dest = if dest.contains('%') && !is_wikilink {
+        decoded = decode_destination(dest);
+        decoded.as_str()
+    } else {
+        dest
+    };
     let cleaned = dest.replace('\\', "/");
     let cleaned = cleaned.trim_start_matches('/');
 
@@ -190,20 +198,29 @@ fn resolved_image(vault_root: &Path, path: &Path) -> Option<ResolvedImage> {
     Some(ResolvedImage { abs, rel })
 }
 
-pub fn skip_hidden_rel(rel: &str) -> bool {
-    rel.split('/').any(|p| p.starts_with('.'))
+fn decode_destination(dest: &str) -> String {
+    let mut bytes = Vec::new();
+    let input = dest.as_bytes();
+    let mut i = 0;
+    while i < input.len() {
+        if input[i] == b'%' && i + 2 < input.len() {
+            if let (Some(a), Some(b)) = (
+                (input[i + 1] as char).to_digit(16),
+                (input[i + 2] as char).to_digit(16),
+            ) {
+                bytes.push((a * 16 + b) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        bytes.push(input[i]);
+        i += 1;
+    }
+    String::from_utf8(bytes).unwrap_or_else(|_| dest.to_owned())
 }
 
-/// Show an image fitted to the available width (preview / inline).
-pub fn show_fitted_image(ui: &mut egui::Ui, abs: &Path, max_width: f32) -> egui::Response {
-    let uri = path_to_file_uri(abs);
-    let max_w = max_width.max(32.0);
-    ui.add(
-        egui::Image::new(uri)
-            .max_width(max_w)
-            .maintain_aspect_ratio(true)
-            .sense(egui::Sense::click()),
-    )
+pub fn skip_hidden_rel(rel: &str) -> bool {
+    rel.split('/').any(|p| p.starts_with('.'))
 }
 
 /// Full-pane standalone image viewer.
