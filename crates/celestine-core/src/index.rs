@@ -302,7 +302,7 @@ mod tests {
             .unwrap());
         let note = index.get_by_rel("note.md").unwrap();
         assert_eq!(note.id, id);
-        assert_eq!(note.path, new_path);
+        assert_eq!(note.path, new_path.canonicalize().unwrap());
         assert_eq!(note.title, "New");
     }
 
