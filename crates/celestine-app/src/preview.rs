@@ -1468,6 +1468,7 @@ mod tests {
     #[test]
     fn preview_image_dimensions_and_mouse_resize_use_original_source_offsets() {
         let root = tempfile::tempdir().unwrap();
+        let canonical_root = root.path().canonicalize().unwrap();
         let path = root.path().join("image.png");
         image::RgbaImage::from_pixel(200, 100, image::Rgba([255, 0, 0, 255])).save(&path).unwrap();
         let ctx = egui::Context::default();
@@ -1482,7 +1483,7 @@ mod tests {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(700.0, 800.0))),
                 ..Default::default()
             }, |ui| {
-                result = Some(show_preview(ui, body, "Note.md", root.path(), &VaultIndex::new(), &[],
+                result = Some(show_preview(ui, body, "Note.md", &canonical_root, &VaultIndex::new(), &[],
                     Color32::WHITE, Color32::GRAY, Color32::WHITE, Color32::GRAY,
                     16.0, None, None, &[Color32::WHITE; 6], &mut resolver));
             });

@@ -1738,10 +1738,8 @@ fn save_pasted_image(env: &BoardEnv<'_>, image: &egui::ColorImage) -> Result<Str
 fn pasted_file_paths(text: &str) -> Option<Vec<PathBuf>> {
     let mut paths = Vec::new();
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
-        let path = if let Some(rest) = line.strip_prefix("file://") {
-            // Drop an optional host (`file://localhost/...`).
-            let rest = &rest[rest.find('/')?..];
-            PathBuf::from(percent_decode(rest)?)
+        let path = if line.starts_with("file://") {
+            url::Url::parse(line).ok()?.to_file_path().ok()?
         } else {
             let p = PathBuf::from(line);
             if !(p.is_absolute() && p.is_file()) {
@@ -1752,23 +1750,6 @@ fn pasted_file_paths(text: &str) -> Option<Vec<PathBuf>> {
         paths.push(path);
     }
     (!paths.is_empty()).then_some(paths)
-}
-
-fn percent_decode(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            let hex = s.get(i + 1..i + 3)?;
-            out.push(u8::from_str_radix(hex, 16).ok()?);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).ok()
 }
 
 fn new_note_rel(folder: &str, name: &str) -> String {
@@ -2211,7 +2192,7 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         let src = outside.path().join("my shot.png");
         std::fs::copy(&abs, &src).unwrap();
-        let uri = format!("file://{}", src.display().to_string().replace(' ', "%20"));
+        let uri = crate::media::path_to_file_uri(&src);
         h.frame(&mut b, vec![egui::Event::Paste(uri)]);
         assert_eq!(b.doc.nodes[1].file.as_deref(), Some("attachments/my shot.png"));
 
@@ -2221,9 +2202,15 @@ mod tests {
 
     #[test]
     fn file_paste_parsing() {
+        #[cfg(not(windows))]
         assert_eq!(
             pasted_file_paths("file:///tmp/a%20b.png\nfile://localhost/x/y.jpg\n"),
             Some(vec![PathBuf::from("/tmp/a b.png"), PathBuf::from("/x/y.jpg")])
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            pasted_file_paths("file:///C:/Temp/a%20b.png\nfile://localhost/C:/Temp/y.jpg\n"),
+            Some(vec![PathBuf::from(r"C:\Temp\a b.png"), PathBuf::from(r"C:\Temp\y.jpg")])
         );
         assert_eq!(pasted_file_paths("hello world"), None);
         assert_eq!(pasted_file_paths("file:///ok.png\nnot a path"), None);

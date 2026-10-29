@@ -51,6 +51,7 @@ egui_extras = { version = "0.37", features = ["file", "image", "svg", "gif", "we
 rfd = "0.15"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 emojis = "0.6"
+url = "2"
 
 [patch.crates-io]
 notify = { path = "vendor/notify" }

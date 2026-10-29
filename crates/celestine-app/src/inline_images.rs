@@ -116,7 +116,7 @@ mod tests {
         let original = "before\n![alt|200x100](image.png)\nafter\n";
         let mut text = original.to_owned();
         let mut resolver = ImageResolver::default();
-        resolver.set_context(dir.path(), "Note.md", "editor");
+        resolver.set_context(&dir.path().canonicalize().unwrap(), "Note.md", "editor");
         let mut frame = |time: f64, events: Vec<egui::Event>| {
             let mut rect = Rect::NOTHING;
             let mut output = ctx.run_ui(
@@ -230,7 +230,7 @@ mod tests {
         let ctx = egui::Context::default();
         egui_extras::install_image_loaders(&ctx);
         let mut resolver = ImageResolver::default();
-        resolver.set_context(dir.path(), "Note.md", text);
+        resolver.set_context(&dir.path().canonicalize().unwrap(), "Note.md", text);
         let mut out = ctx.run_ui(Default::default(), |ui| {
             let plain = ui.fonts_mut(|f| {
                 f.layout_no_wrap(

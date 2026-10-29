@@ -99,7 +99,9 @@ impl VaultIndex {
         if !rel.to_lowercase().ends_with(".md") {
             return Err(CoreError::NoteNotFound(rel));
         }
-        if !is_visible_path(vault_root, &path) {
+        // `rel` has already been checked against the canonical vault root.
+        // The caller's root may use a symlink or a non-canonical OS spelling.
+        if rel.split('/').any(|part| part.starts_with('.')) {
             return Err(CoreError::NoteNotFound(rel));
         }
 

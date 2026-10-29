@@ -348,6 +348,12 @@ fn index_accepts_absolute_events_through_a_symlinked_vault_root() {
     index.upsert_file(&root, &alias.join("note.md")).unwrap();
     assert_eq!(index.len(), 1);
     assert!(index.get_by_rel("note.md").is_some());
+
+    let mut aliased_index = VaultIndex::new();
+    aliased_index.upsert_file(&alias, &alias.join("note.md")).unwrap();
+    assert!(aliased_index.get_by_rel("note.md").is_some());
+    fs::write(root.join(".hidden.md"), "hidden").unwrap();
+    assert!(aliased_index.upsert_file(&alias, &alias.join(".hidden.md")).is_err());
 }
 
 #[cfg(target_os = "macos")]

@@ -108,13 +108,9 @@ pub fn is_image_target(target: &str) -> bool {
 /// `file://` URI for egui_extras FileLoader.
 pub fn path_to_file_uri(path: &Path) -> String {
     let abs = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let s = abs.to_string_lossy().replace('\\', "/");
-    if s.starts_with('/') {
-        format!("file://{s}")
-    } else {
-        // Windows drive paths: C:/...
-        format!("file:///{s}")
-    }
+    url::Url::from_file_path(&abs)
+        .map(|uri| uri.to_string())
+        .unwrap_or_else(|_| format!("file://{}", abs.display()))
 }
 
 /// Resolve a markdown / wikilink image destination to an absolute path under the vault.
@@ -249,6 +245,19 @@ pub fn show_standalone(ui: &mut egui::Ui, abs: &Path, muted: egui::Color32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_uris_round_trip_native_paths_and_special_characters() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("my %20 # 文.png");
+        std::fs::write(&path, "image").unwrap();
+        let uri = path_to_file_uri(&path);
+        let decoded = url::Url::parse(&uri).unwrap().to_file_path().unwrap();
+        assert_eq!(decoded.canonicalize().unwrap(), path.canonicalize().unwrap());
+        assert!(uri.contains("%2520"));
+        assert!(uri.contains("%23"));
+        assert!(!uri.contains('\\'));
+    }
     use std::fs;
 
     #[test]

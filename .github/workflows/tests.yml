@@ -62,10 +62,15 @@ jobs:
         shell: python
         run: |
           from pathlib import Path
+          import re
           log = Path("test-output.log")
           if log.exists():
               # Expose the failure summary in check annotations as well as logs.
               # This also permits diagnosis using the public GitHub API.
-              message = "\n".join(log.read_text(errors="replace").splitlines()[-100:])[-12000:]
-              message = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-              print(f"::error title=Workspace test failure::{message}")
+              contents = log.read_text(errors="replace")
+              failures = re.split(r"(?m)(?=^---- .* stdout ----$)", contents)
+              failures = [part for part in failures if part.startswith("---- ")]
+              for message in failures or [contents[-3500:]]:
+                  # GitHub truncates each annotation at 4096 characters.
+                  message = message[:3500].replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+                  print(f"::error title=Workspace test failure::{message}")

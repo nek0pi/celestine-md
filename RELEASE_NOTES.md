@@ -8,6 +8,7 @@
 - Git integration for vault repositories: inspect changes and diffs, commit, pull, and sync from the app.
 - Improved graph layout and interaction, including draggable nodes and more responsive settling for larger vaults.
 - Empty folders appear in the file tree immediately after creation and can be renamed right away.
+- More reliable vault path resolution and image-file URLs on macOS and Windows.
 - Canvas boards with drawing, text, note and image cards, and arrows.
 - Better table editing and Omarchy theme integration.
 
