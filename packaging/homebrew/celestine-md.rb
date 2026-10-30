@@ -44,11 +44,13 @@ class CelestineMd < Formula
     if build.head?
       system "cargo", "build", "--release", "-p", "celestine-app"
       bin.install "target/release/celestine"
+      (pkgshare/"licenses").install "assets/fonts/JetBrainsMono-OFL.txt"
       (pkgshare/"themes").install Dir["themes/*.css"]
       (pkgshare/"config").install Dir["config/keybindings.*.toml"]
     else
       # Release tarball layout: bin/celestine + share/...
       bin.install "bin/celestine"
+      (pkgshare/"licenses").install Dir["share/celestine/licenses/*"] if Dir.exist?("share/celestine/licenses")
       (pkgshare/"themes").install Dir["share/celestine/themes/*.css"] if Dir.exist?("share/celestine/themes")
       (pkgshare/"config").install Dir["share/celestine/config/*.toml"] if Dir.exist?("share/celestine/config")
     end

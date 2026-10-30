@@ -1,46 +1,30 @@
 use egui::{FontData, FontDefinitions, FontFamily};
 use std::sync::Arc;
 
-/// Install JetBrains Mono for UI/editor text.
-///
-/// Color emoji (and other missing scripts) come from eframe's `system_fonts`
-/// provider (`Noto Color Emoji` on this machine). We deliberately do **not**
-/// install monochrome outline emoji fonts — those would claim the same
-/// codepoints and paint as washed-out wireframe glyphs instead of color.
+/// Use the same bundled text faces on every platform. System fonts remain
+/// available for color emoji and scripts not covered by JetBrains Mono.
 pub fn install(ctx: &egui::Context) {
+    ctx.set_fonts(definitions());
+}
+
+fn definitions() -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
-
-    // Prefer plain JetBrains Mono (not Nerd) so PUA/icon patches never shadow text.
-    let regular = load_first(&[
-        "/usr/share/fonts/TTF/JetBrainsMono-Regular.ttf",
-        "/usr/share/fonts/jetbrainsmono/JetBrainsMono-Regular.ttf",
-        "/usr/share/fonts/OTF/JetBrainsMono-Regular.otf",
-        "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf",
-        "/usr/share/fonts/TTF/JetBrainsMonoNL-Regular.ttf",
-    ]);
-    let bold = load_first(&[
-        "/usr/share/fonts/TTF/JetBrainsMono-Bold.ttf",
-        "/usr/share/fonts/jetbrainsmono/JetBrainsMono-Bold.ttf",
-        "/usr/share/fonts/OTF/JetBrainsMono-Bold.otf",
-        "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Bold.ttf",
-    ]);
-
-    if let Some(data) = regular {
-        fonts.font_data.insert(
-            "celestine_mono".into(),
-            Arc::new(FontData::from_owned(data)),
-        );
-    }
-    if let Some(data) = bold {
-        fonts.font_data.insert(
-            "celestine_mono_bold".into(),
-            Arc::new(FontData::from_owned(data)),
-        );
-        fonts.families.insert(
-            FontFamily::Name("celestine_mono_bold".into()),
-            vec!["celestine_mono_bold".into()],
-        );
-    }
+    fonts.font_data.insert(
+        "celestine_mono".into(),
+        Arc::new(FontData::from_static(include_bytes!(
+            "../../../assets/fonts/JetBrainsMono-Regular.ttf"
+        ))),
+    );
+    fonts.font_data.insert(
+        "celestine_mono_bold".into(),
+        Arc::new(FontData::from_static(include_bytes!(
+            "../../../assets/fonts/JetBrainsMono-Bold.ttf"
+        ))),
+    );
+    fonts.families.insert(
+        FontFamily::Name("celestine_mono_bold".into()),
+        vec!["celestine_mono_bold".into()],
+    );
 
     // Drop stock monochrome emoji faces so the system color-emoji provider
     // owns those codepoints (otherwise OpenMoji/Noto outline wins and looks flat).
@@ -61,7 +45,7 @@ pub fn install(ctx: &egui::Context) {
     prepend_mono(&mut fonts, FontFamily::Proportional);
     prepend_mono(&mut fonts, FontFamily::Monospace);
 
-    ctx.set_fonts(fonts);
+    fonts
 }
 
 fn strip_emoji_faces_from_families(fonts: &mut FontDefinitions) {
@@ -76,9 +60,7 @@ fn strip_emoji_faces_from_families(fonts: &mut FontDefinitions) {
 fn prepend_mono(fonts: &mut FontDefinitions, family: FontFamily) {
     let Some(existing) = fonts.families.get(&family).cloned() else {
         if fonts.font_data.contains_key("celestine_mono") {
-            fonts
-                .families
-                .insert(family, vec!["celestine_mono".into()]);
+            fonts.families.insert(family, vec!["celestine_mono".into()]);
         }
         return;
     };
@@ -94,11 +76,19 @@ fn prepend_mono(fonts: &mut FontDefinitions, family: FontFamily) {
     fonts.families.insert(family, ordered);
 }
 
-fn load_first(paths: &[&str]) -> Option<Vec<u8>> {
-    for path in paths {
-        if let Ok(bytes) = std::fs::read(path) {
-            return Some(bytes);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundled_faces_lead_both_text_families_without_system_font_discovery() {
+        let fonts = definitions();
+        for family in [FontFamily::Proportional, FontFamily::Monospace] {
+            assert_eq!(fonts.families[&family][0], "celestine_mono");
         }
+        assert_eq!(
+            fonts.families[&FontFamily::Name("celestine_mono_bold".into())],
+            vec!["celestine_mono_bold"]
+        );
     }
-    None
 }

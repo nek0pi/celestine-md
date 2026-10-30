@@ -109,6 +109,8 @@ jobs:
                    "$STAGE/share/applications" "$STAGE/share/icons/hicolor/scalable/apps"
           BIN="target/${{ matrix.target }}/release/celestine${{ matrix.ext }}"
           install -m755 "$BIN" "$STAGE/bin/celestine"
+          mkdir -p "$STAGE/share/celestine/licenses"
+          cp assets/fonts/JetBrainsMono-OFL.txt "$STAGE/share/celestine/licenses/"
           cp -a themes/*.css "$STAGE/share/celestine/themes/"
           cp -a config/keybindings.*.toml "$STAGE/share/celestine/config/"
           cp packaging/celestine.desktop "$STAGE/share/applications/"
@@ -155,6 +157,8 @@ jobs:
           else
             cp "target/${{ matrix.target }}/release/celestine.exe" "$STAGE/"
           fi
+          mkdir -p "$STAGE/licenses"
+          cp assets/fonts/JetBrainsMono-OFL.txt "$STAGE/licenses/"
           cp themes/*.css "$STAGE/themes/"
           cp config/keybindings.*.toml "$STAGE/config/"
           cat > "$STAGE/README.txt" <<EOF

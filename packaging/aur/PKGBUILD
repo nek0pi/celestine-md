@@ -48,4 +48,5 @@ package() {
   install -Dm644 themes/*.css "$pkgdir/usr/share/celestine/themes/"
   install -Dm644 config/keybindings.*.toml "$pkgdir/usr/share/celestine/config/"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 assets/fonts/JetBrainsMono-OFL.txt "$pkgdir/usr/share/licenses/$pkgname/JetBrainsMono-OFL.txt"
 }

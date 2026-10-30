@@ -482,9 +482,9 @@ fn wikilink_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"!?\[\[([^\[\]]+)\]\]").expect("wikilink"))
 }
 
-/// Vertical gap after each preview paragraph (doubled from the original 20px).
-/// Extra blank lines in the source multiply this unit (3 empties → 3× gap).
-const PARA_GAP: f32 = 40.0;
+/// Paragraph spacing scales with note text, using the same logical units on
+/// every platform. Additional source blank lines add one more em apiece.
+const PARAGRAPH_GAP_EM: f32 = 1.0;
 
 /// HTML comment inserted for runs of 2+ blank lines so preview can scale gaps.
 /// CommonMark collapses blank runs; this preserves the count for rendering.
@@ -514,7 +514,7 @@ fn fence_opener(line: &str) -> Option<&str> {
 }
 
 /// Replace runs of 2+ blank lines (outside fenced code) with a countable marker.
-/// One blank line stays a normal Markdown paragraph break (base [`PARA_GAP`]).
+/// One blank line stays a normal Markdown paragraph break.
 fn inject_extra_vblank_markers(body: &str) -> String {
     let mut out = String::with_capacity(body.len() + 32);
     let mut blank_run: usize = 0;
@@ -619,6 +619,7 @@ pub fn show_preview(
     image_resolver: &mut media::ImageResolver,
 ) -> PreviewOutcome {
     image_resolver.set_context(vault_root, note_rel, body);
+    let paragraph_gap = font_size * PARAGRAPH_GAP_EM;
     let headings = HeadingColors::from_theme(heading_palette);
     let heading_match = scroll_to_heading.map(|w| HeadingMatch::for_target(body, w));
     let prepared = preprocess(body);
@@ -717,7 +718,7 @@ pub fn show_preview(
         );
         // Breathing room between paragraphs / sentence blocks in preview.
         // Extra blank lines add further multiples via `celestine-vblank` markers.
-        ui.add_space(PARA_GAP);
+        ui.add_space(paragraph_gap);
     };
 
     let style_text = |s: &str,
@@ -1123,9 +1124,9 @@ pub fn show_preview(
                 }
                 Event::Html(html) | Event::InlineHtml(html) => {
                     if let Some(n) = parse_vblank_mark(&html) {
-                        // Base PARA_GAP already added after the previous block;
-                        // extras scale so N blank lines → N × PARA_GAP total.
-                        ui.add_space((n - 1) as f32 * PARA_GAP);
+                        // Base paragraph gap already added after the previous block;
+                        // extras scale so N blank lines → N × paragraph gap total.
+                        ui.add_space((n - 1) as f32 * paragraph_gap);
                     } else {
                         // Strip simple tags; keep text-ish content
                         let stripped = html.replace('<', "").replace('>', "");
@@ -1352,6 +1353,30 @@ mod tests {
                 modifiers: egui::Modifiers::NONE,
             },
         ]
+    }
+
+    #[test]
+    fn bundled_preview_font_and_paragraph_spacing_are_consistent() {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx);
+        let measure = |body: &str| {
+            let (_, output) = preview_frame(&ctx, body, 0.0, vec![]);
+            let texts = painted_text(&output);
+            let first = texts.iter().find(|t| t.galley.job.text == "Wi m").unwrap();
+            let second = texts.iter().find(|t| t.galley.job.text == "Next").unwrap();
+            let glyphs = &first.galley.rows[0].glyphs;
+            // Preview's proportional family deliberately uses JetBrains Mono,
+            // including on machines with no Linux font directories.
+            assert!((glyphs[0].advance_width - glyphs[1].advance_width).abs() < 0.01);
+            assert!((glyphs[0].advance_width - glyphs[2].advance_width).abs() < 0.01);
+            second.pos.y - (first.pos.y + first.galley.size().y)
+        };
+        let ordinary = measure("Wi m\n\nNext");
+        let crlf = measure("Wi m\r\n\r\nNext");
+        let extra_blank = measure("Wi m\n\n\nNext");
+        assert!((ordinary - crlf).abs() < 0.01);
+        assert!((18.0..28.0).contains(&ordinary), "ordinary gap: {ordinary}");
+        assert!((extra_blank - ordinary - 18.0).abs() < 5.0);
     }
 
     #[test]
